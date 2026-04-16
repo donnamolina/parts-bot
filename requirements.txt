@@ -1,0 +1,5 @@
+aiohttp>=3.9.0
+openpyxl>=3.1.0
+rockauto-api>=0.1.0
+anthropic>=0.40.0
+PyMuPDF>=1.24.0

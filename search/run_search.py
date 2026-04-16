@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+"""
+Search bridge script — called by server.js to run the full search pipeline.
+Reads extraction JSON from input file, runs parallel search, generates Excel.
+Outputs summary JSON to stdout. Writes progress to a sidecar file.
+"""
+
+import argparse
+import asyncio
+import json
+import os
+import sys
+import logging
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from search.engine import search_all_parts
+from search.excel_builder import generate_excel
+from search.dictionary import translate_part
+from search.vin_decode import decode_vin
+from search.db_client import (
+    get_correction_override, get_cached_result, upsert_cached_result_safe
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s: %(message)s",
+    handlers=[
+        logging.FileHandler(Path(__file__).parent.parent / "logs" / "searches.log"),
+        logging.StreamHandler(sys.stderr),
+    ]
+)
+logger = logging.getLogger("parts-bot.run_search")
+
+
+def load_env():
+    env_path = Path(__file__).parent.parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line and "=" in line and not line.startswith("#"):
+                key, val = line.split("=", 1)
+                os.environ.setdefault(key.strip(), val.strip())
+
+
+async def sonnet_verify_results(vehicle_info: dict, results: list) -> list:
+    """Single Sonnet call to review the full results table and flag issues.
+    Returns list of flagged issue strings, empty if all looks good.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return []
+
+    try:
+        import anthropic
+    except ImportError:
+        logger.warning("anthropic package not installed — skipping verification pass")
+        return []
+
+    lines = []
+    for i, r in enumerate(results, 1):
+        part = r.get("part", {})
+        best = r.get("best_option")
+        name_orig = part.get("name_original", "")
+        name_en = part.get("name_english", "")
+        side = part.get("side") or "none"
+        position = part.get("position") or ""
+
+        if best:
+            price = best.get("total_price") or best.get("price", 0)
+            source = best.get("source", "?")
+            pn = best.get("part_number", "") or "no OEM#"
+            lines.append(
+                f"{i}. DR:\"{name_orig}\" EN:\"{name_en}\" side:{side} pos:{position} "
+                f"| best: ${price:.2f} ({source}, {pn})"
+            )
+        else:
+            lines.append(
+                f"{i}. DR:\"{name_orig}\" EN:\"{name_en}\" side:{side} pos:{position} | NO RESULTS"
+            )
+
+    table = "\n".join(lines)
+    prompt = (
+        f"Vehicle: {vehicle_info.get('year')} {vehicle_info.get('make')} {vehicle_info.get('model')}\n\n"
+        f"Parts search results:\n{table}\n\n"
+        f"Review each result. Flag ONLY items that look wrong: wrong part type, wrong side/fitment, "
+        f"suspicious price (way too cheap or too expensive for the part), or translation that doesn't "
+        f"make sense for this vehicle. "
+        f"If everything looks fine, return exactly: OK\n"
+        f"Otherwise return a short bulleted list in Spanish, one line per issue, format: "
+        f"\"#N: [issue]\". Be concise. Max 1 sentence per flag."
+    )
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=512,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        raw = msg.content[0].text.strip()
+        if raw.upper() == "OK":
+            return []
+        flags = [line.strip().lstrip("•-* ") for line in raw.splitlines() if line.strip()]
+        return flags
+    except Exception as e:
+        logger.warning(f"Sonnet verification failed: {e}")
+        return []
+
+
+async def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", required=True, help="Path to extraction JSON")
+    parser.add_argument("--output", required=True, help="Path for output Excel")
+    parser.add_argument("--results-output", help="Optional path to write full results JSON")
+    args = parser.parse_args()
+
+    load_env()
+
+    # Read extraction data
+    input_data = json.loads(Path(args.input).read_text())
+    extraction = input_data.get("extraction", input_data)
+
+    vin = extraction.get("vin", "")
+    vehicle_from_ocr = extraction.get("vehicle", {})
+    parts_raw = extraction.get("parts", [])
+    supplier_total_dop = extraction.get("supplier_total_dop")
+
+    if not parts_raw:
+        json.dump({"error": "No parts in extraction data"}, sys.stdout)
+        print()
+        sys.exit(1)
+
+    # Decode VIN for accurate vehicle data
+    vehicle_info = {}
+    if vin and len(vin) == 17:
+        logger.info(f"Decoding VIN: {vin}")
+        decoded = await decode_vin(vin)
+        if not decoded.get("error"):
+            # NHTSA returns uppercase makes ("TOYOTA", "KIA") — normalize to title case
+            # so rockauto_api can match the vehicle catalog correctly.
+            raw_make = decoded["make"] or ""
+            raw_model = decoded["model"] or ""
+            vehicle_info = {
+                "vin": vin,
+                "year": decoded["year"],
+                "make": raw_make.title() if raw_make.isupper() else raw_make,
+                "model": raw_model.title() if raw_model.isupper() else raw_model,
+                "trim": decoded.get("trim"),
+            }
+            logger.info(f"VIN decoded: {vehicle_info['year']} {vehicle_info['make']} {vehicle_info['model']}")
+        else:
+            logger.warning(f"VIN decode failed: {decoded['error']}")
+
+    # Fallback to OCR vehicle data
+    if not vehicle_info.get("make"):
+        vehicle_info = {
+            "vin": vin or "N/A",
+            "year": vehicle_from_ocr.get("year", 0),
+            "make": vehicle_from_ocr.get("make", "Unknown"),
+            "model": vehicle_from_ocr.get("model", "Unknown"),
+            "trim": vehicle_from_ocr.get("trim"),
+        }
+
+    # Build parts list for search engine — deduplicating by name+side+position
+    # (OCR sometimes lists the same part twice; merge into quantity instead)
+    seen_parts: dict[tuple, dict] = {}
+    for p in parts_raw:
+        part = {
+            "name_original": p.get("name_original", ""),
+            "name_dr": p.get("name_dr", ""),
+            "name_english": p.get("name_english", ""),
+            "side": p.get("side"),
+            "position": p.get("position"),
+            "local_price": p.get("local_price", 0) or 0,
+            "quantity": p.get("quantity", 1) or 1,
+        }
+
+        # Ensure English translation exists
+        if not part["name_english"] or part["name_english"] == part["name_original"]:
+            translated = translate_part(part["name_original"])
+            part["name_english"] = translated["name_english"]
+            part["side"] = part["side"] or translated["side"]
+            part["position"] = part["position"] or translated["position"]
+
+        dedup_key = (
+            part["name_english"].lower().strip(),
+            (part["side"] or "").lower(),
+            (part["position"] or "").lower(),
+        )
+        if dedup_key in seen_parts:
+            # Same part listed twice — increment quantity, accumulate price
+            seen_parts[dedup_key]["quantity"] += part["quantity"]
+            seen_parts[dedup_key]["local_price"] += part["local_price"]
+            logger.info(f"Deduped '{part['name_english']}' → qty {seen_parts[dedup_key]['quantity']}")
+        else:
+            seen_parts[dedup_key] = part
+
+    parts_list = list(seen_parts.values())
+
+    # Apply correction overrides from the learning DB (confirmed past corrections)
+    make = vehicle_info.get("make", "")
+    model = vehicle_info.get("model", "")
+    for part in parts_list:
+        override = get_correction_override(make, model, part.get("name_english", ""))
+        if not override:
+            override = get_correction_override(make, model, part.get("name_original", ""))
+        if override and override != part.get("name_english"):
+            logger.info(f"Correction override applied: '{part['name_english']}' → '{override}'")
+            part["name_english"] = override
+
+    # Cache lookup — split into cached vs needs-search
+    year = vehicle_info.get("year", 0)
+    cached_indices = {}   # index → pre-built result dict
+    search_parts = []
+    search_indices = []   # original index in parts_list
+
+    for i, part in enumerate(parts_list):
+        cached = get_cached_result(make, model, year, part.get("name_english", ""))
+        # Invalidate cached results that have RockAuto as source — stored before
+        # RockAuto was removed as a purchase source; must re-search via eBay.
+        if cached and (cached.get("best_option") or {}).get("source") == "RockAuto":
+            cached = None
+        if cached:
+            cached["part"] = part
+            cached_indices[i] = cached
+        else:
+            search_parts.append(part)
+            search_indices.append(i)
+
+    logger.info(
+        f"Searching {len(search_parts)} parts for {vehicle_info.get('year')} "
+        f"{vehicle_info.get('make')} {vehicle_info.get('model')} "
+        f"({len(cached_indices)} from cache)"
+    )
+
+    # Progress callback — writes to sidecar file for Node.js to read
+    progress_path = args.input.replace(".json", "_progress.json")
+
+    async def on_progress(found, total):
+        try:
+            Path(progress_path).write_text(json.dumps({
+                "found": found,
+                "total": total,
+            }))
+        except Exception:
+            pass
+
+    # Run parallel search (only non-cached parts)
+    fresh_results = await search_all_parts(
+        search_parts, vehicle_info, on_progress=on_progress
+    ) if search_parts else []
+
+    # Merge cached + fresh results in original order
+    fresh_iter = iter(fresh_results)
+    results = []
+    for i in range(len(parts_list)):
+        if i in cached_indices:
+            results.append(cached_indices[i])
+        else:
+            results.append(next(fresh_iter))
+
+    # Sonnet end-of-batch verification pass
+    sonnet_flags = await sonnet_verify_results(vehicle_info, results)
+    if sonnet_flags:
+        logger.info(f"Sonnet flagged {len(sonnet_flags)} issue(s): {sonnet_flags}")
+    else:
+        logger.info("Sonnet verification: all clear")
+
+    # Cache fresh results (fire-and-forget — don't block Excel generation)
+    flagged_indices = set()
+    for flag in sonnet_flags:
+        import re as _re
+        m = _re.search(r'#(\d+)', flag)
+        if m:
+            flagged_indices.add(int(m.group(1)) - 1)  # 0-based
+
+    for i, r in enumerate(results):
+        if not r.get("from_cache") and r.get("best_option") and i not in flagged_indices:
+            part = r.get("part", {})
+            upsert_cached_result_safe(
+                make, model, year,
+                part.get("name_english", ""),
+                r,
+                verified_by_correction=False,
+            )
+
+    # Generate Excel
+    logger.info(f"Generating Excel: {args.output}")
+    generate_excel(results, vehicle_info, args.output,
+                   supplier_total_dop=supplier_total_dop,
+                   sonnet_flags=sonnet_flags)
+
+    # Calculate summary
+    found = sum(1 for r in results if r.get("best_option"))
+    total_local = sum(r["part"].get("local_price", 0) or 0 for r in results)
+    total_landed = sum(
+        r["landed_cost"]["total_landed_dop"]
+        for r in results
+        if r.get("landed_cost") and r["landed_cost"].get("total_landed_dop")
+    )
+    total_savings = total_local - total_landed if total_local > 0 and total_landed > 0 else 0
+
+    summary = {
+        "error": None,
+        "summary": {
+            "total_parts": len(results),
+            "found": found,
+            "not_found": len(results) - found,
+            "total_local_dop": round(total_local, 2),
+            "total_landed_dop": round(total_landed, 2),
+            "total_savings_dop": round(total_savings, 2),
+            "savings_pct": round(total_savings / total_local * 100, 1) if total_local > 0 else 0,
+        },
+        "sonnet_flags": sonnet_flags,
+        "excel_path": args.output,
+    }
+
+    # Write full results JSON if requested (used by post-search correction flow)
+    if args.results_output:
+        full_output = {
+            "vehicle": vehicle_info,
+            "results": results,
+        }
+        Path(args.results_output).write_text(
+            json.dumps(full_output, indent=2, ensure_ascii=False, default=str)
+        )
+
+    json.dump(summary, sys.stdout, indent=2, ensure_ascii=False)
+    print()
+    logger.info(f"Search complete: {found}/{len(results)} found, "
+                f"savings RD${total_savings:,.0f}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
