@@ -19,21 +19,24 @@ Does this eBay listing match the requested part?
 
 Requested part: {part_name} for {year} {make} {model}
 OEM number searched: {oem_number}
+OEM catalog description: {oem_description}
 eBay listing title: {listing_title}
 eBay listing price: ${price}
 
-Think about:
-- Is this the same TYPE of part? (not just similar words)
-- Is a bracket being sold as an assembly?
-- Is this for the correct vehicle or a platform sibling?
-- Is the price reasonable for this type of part?
+Check TWO consistency conditions:
+(a) Does the eBay listing match the CLIENT REQUEST (the requested part name)?
+(b) Does the OEM catalog description match the client request AND match what the eBay listing is selling?
+    — If the OEM describes a sub-component (REINFORCEMENT, ABSORBER, BRACE, SUB-ASSY) but the
+      client requested the full assembly, that is an OEM mismatch even if the eBay listing is correct.
 
 Reply with ONLY one line:
-MATCH — correct part
-WRONG_PART — [5 word explanation]
+MATCH — all three align (client request, OEM description, eBay listing)
+OEM_MISMATCH — [5 word explanation] (eBay listing is correct, but OEM describes a different sub-component)
+WRONG_PART — [5 word explanation] (eBay listing does not match the client request)
 SUSPICIOUS_PRICE — [5 word explanation]
 
-If unsure, reply MATCH — false positives are worse than false negatives."""
+If the OEM description field is empty or "N/A", ignore condition (b) and only check (a).
+If unsure about (b), reply MATCH — OEM mismatches should only be flagged when clearly different."""
 
 
 async def verify_ebay_listing(
@@ -45,37 +48,67 @@ async def verify_ebay_listing(
     listing_title: str,
     price: float,
     api_key: str,
+    oem_description: str = "",
 ) -> dict:
     """
     Call Sonnet to verify an eBay listing matches the requested part.
 
-    Returns dict: {"verdict": "MATCH"|"WRONG_PART"|"SUSPICIOUS_PRICE", "note": str}
+    Returns dict: {"verdict": "MATCH"|"WRONG_PART"|"SUSPICIOUS_PRICE"|"OEM_MISMATCH"|"UNVERIFIED", "note": str}
     """
-    try:
-        import anthropic
+    _desc = oem_description or "N/A"
 
+    async def _call_once(client):
         prompt = VERIFY_PROMPT.format(
             part_name=part_name_english,
             year=year,
             make=make,
             model=model,
-            oem_number=oem_number,
+            oem_number=oem_number or "N/A",
+            oem_description=_desc,
             listing_title=listing_title,
             price=f"{price:.2f}",
         )
-
-        client = anthropic.AsyncAnthropic(api_key=api_key)
         msg = await client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=50,
+            max_tokens=60,
             messages=[{"role": "user", "content": prompt}],
         )
-        raw = msg.content[0].text.strip()
+        return msg.content[0].text.strip()
+
+    try:
+        import anthropic
+
+        client = anthropic.AsyncAnthropic(api_key=api_key)
+
+        raw = None
+        last_exc = None
+        for attempt in range(2):
+            try:
+                raw = await _call_once(client)
+                break
+            except Exception as e:
+                last_exc = e
+                if attempt == 0:
+                    await asyncio.sleep(1)
+                # Don't retry on 4xx auth errors — they won't recover
+                err_str = str(e)
+                if "403" in err_str or "401" in err_str or "400" in err_str:
+                    break
+                if attempt == 0:
+                    await asyncio.sleep(3)
+
+        if raw is None:
+            logger.warning(f"verify_ebay_listing failed after retries for '{part_name_english}': {last_exc}")
+            return {"verdict": "UNVERIFIED", "note": "Verificación no disponible"}
+
         logger.info(f"verify '{part_name_english}': {raw[:80]}")
 
         if raw.startswith("WRONG_PART"):
             note = raw[len("WRONG_PART"):].lstrip(" —-").strip()
             return {"verdict": "WRONG_PART", "note": note or "Wrong part type"}
+        elif raw.startswith("OEM_MISMATCH"):
+            note = raw[len("OEM_MISMATCH"):].lstrip(" —-").strip()
+            return {"verdict": "OEM_MISMATCH", "note": note or "OEM sub-component mismatch"}
         elif raw.startswith("SUSPICIOUS_PRICE"):
             note = raw[len("SUSPICIOUS_PRICE"):].lstrip(" —-").strip()
             return {"verdict": "SUSPICIOUS_PRICE", "note": note or "Suspicious price"}
@@ -83,5 +116,5 @@ async def verify_ebay_listing(
             return {"verdict": "MATCH", "note": ""}
 
     except Exception as e:
-        logger.warning(f"verify_ebay_listing failed for '{part_name_english}': {e}")
-        return {"verdict": "MATCH", "note": ""}  # fail-open: don't flag if verify fails
+        logger.warning(f"verify_ebay_listing error for '{part_name_english}': {e}")
+        return {"verdict": "UNVERIFIED", "note": "Verificación no disponible"}

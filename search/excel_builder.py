@@ -51,10 +51,15 @@ def _confidence_label(result: dict, is_flagged: bool) -> str:
     """Compute confidence label for a single result row."""
     if result.get("from_cache"):
         return "✅ Verificado"
-    # Sonnet rejected this specific listing as wrong part — always red regardless of OEM source
+    # Sonnet verdicts that override everything else
     _sv = result.get("sonnet_verify") or {}
-    if _sv.get("verdict") == "WRONG_PART":
+    _sv_verdict = _sv.get("verdict", "")
+    if _sv_verdict == "WRONG_PART":
         return "🔴 Revisar"
+    if _sv_verdict == "OEM_MISMATCH":
+        return "🟡 Medio"   # eBay listing is ok, OEM# doesn't match — still usable
+    if _sv_verdict == "UNVERIFIED":
+        return "🟡 Medio"   # couldn't verify, treat as medium confidence
     best = result.get("best_option") or {}
     pn = best.get("part_number") or ""
     import re as _re
@@ -449,15 +454,24 @@ def generate_excel(results: list, vehicle_info: dict, output_path: str,
             ws.cell(row=row, column=15, value="N/F")
             _style_data(ws.cell(row=row, column=15), bg=bg, align="center")
 
-        # Nota (col 16) — Sonnet per-listing verification result
+        # Nota (col 16) — Sonnet per-listing verification result + side/set notes
         sv = result.get("sonnet_verify") or {}
         verdict = sv.get("verdict", "")
         note_text = sv.get("note", "")
         if verdict == "WRONG_PART":
             nota_val = f"⚠️ Pieza incorrecta: {note_text}" if note_text else "⚠️ Pieza incorrecta"
             nota_bg = ORANGE_BG
+        elif verdict == "OEM_MISMATCH":
+            nota_val = "⚠️ OEM no coincide con listing — verificar"
+            nota_bg = YELLOW_BG
         elif verdict == "SUSPICIOUS_PRICE":
             nota_val = f"💲 Precio sospechoso: {note_text}" if note_text else "💲 Precio sospechoso"
+            nota_bg = YELLOW_BG
+        elif verdict == "UNVERIFIED":
+            nota_val = "🔌 Verificación no disponible"
+            nota_bg = YELLOW_BG
+        elif result.get("set_fallback"):
+            nota_val = "📦 Solo disponible como set — sin pieza individual de lado"
             nota_bg = YELLOW_BG
         else:
             nota_val = ""

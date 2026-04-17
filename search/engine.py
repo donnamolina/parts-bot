@@ -156,6 +156,7 @@ async def search_single_part(
                     oem_number = _zap.oem_number
                     result["oem_source"] = _zap.source
                     result["oem_confidence"] = _zap.confidence
+                    result["oem_description"] = _zap.part_name or ""  # Bug 3: for Sonnet cross-check
                     logger.info(
                         f"7zap OEM# for '{part_english}': {oem_number} "
                         f"({_zap.source}, score from candidates)"
@@ -200,6 +201,7 @@ async def search_single_part(
                       f"{vehicle_info['model']} {full_query} "
                       f"{side or ''}").strip()
 
+        _ebay_used_name_fallback = False  # Bug 2: track if OEM search failed → name query used
         if _is_real_oem(oem_number):
             # Strip trailing brand/grade suffix (e.g. CH2503222w → CH2503222).
             # Aftermarket suppliers append a letter code that eBay listings omit.
@@ -225,6 +227,7 @@ async def search_single_part(
             # Final fallback: name-based if OEM# search returned nothing
             if not ebay_results:
                 logger.info(f"OEM# '{oem_number}' returned no eBay results — falling back to name query")
+                _ebay_used_name_fallback = True
                 ebay_results = await search_ebay(
                     query=name_query,
                     side=side,
@@ -233,6 +236,7 @@ async def search_single_part(
                 )
         else:
             # No valid OEM# — search by description only
+            _ebay_used_name_fallback = True
             ebay_results = await search_ebay(
                 query=name_query,
                 side=side,
@@ -242,15 +246,27 @@ async def search_single_part(
 
         if ebay_results:
             result["ebay"] = ebay_results[0]  # Cheapest valid eBay result
+            # Bug 4: propagate set_fallback flag — Excel will show "Solo disponible como set"
+            if ebay_results[0].get("set_fallback"):
+                result["set_fallback"] = True
 
         # Step 3: Pick best option (cheapest across sources)
         result["best_option"] = _pick_best_option(
             result["rockauto"], result["ebay"], part
         )
 
-        # Inject 7zap OEM# into best_option — _pick_best_option only carries RockAuto's OEM#
-        if result["best_option"] and oem_number and result.get("oem_source", "").startswith("7zap"):
-            result["best_option"]["part_number"] = oem_number
+        # Inject or clear OEM# in best_option based on whether OEM-based search succeeded.
+        if result["best_option"]:
+            if _ebay_used_name_fallback:
+                # Name-based fallback was used — OEM# was never validated against the listing.
+                # Clear it regardless of source (7zap or RockAuto).
+                result["best_option"]["part_number"] = ""
+                if result.get("oem_source", "").startswith("7zap"):
+                    result["oem_source"] = "name_fallback"
+                logger.debug(f"OEM# '{oem_number}' cleared — name-based eBay fallback used")
+            elif oem_number and result.get("oem_source", "").startswith("7zap"):
+                # OEM-based search succeeded AND OEM came from 7zap — inject it
+                result["best_option"]["part_number"] = oem_number
 
         # Step 4: Calculate landed cost if we have a price
         best = result["best_option"]

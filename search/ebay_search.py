@@ -135,8 +135,32 @@ def _extract_shipping_cost(item: dict) -> float:
     return 0.0
 
 
+_SIDE_RIGHT_KW = ("right", "passenger", "rh", "r.h.", "rhs")
+_SIDE_LEFT_KW  = ("left", "driver", "lh", "l.h.", "lhs")
+
+# Part types where a single-side listing is expected — for these, we filter aggressively.
+_SINGLE_SIDE_PARTS = frozenset({
+    "mud flap", "mud guard", "splash guard", "fender liner", "inner fender",
+    "tail light", "headlight", "head light", "fog light", "fog lamp",
+    "turn signal", "side mirror", "door mirror", "mirror", "door handle",
+    "door", "fender", "rocker panel", "sill", "strut", "shock", "control arm",
+    "cv axle", "brake caliper", "tie rod",
+})
+
+# Title keywords that indicate a multi-piece set — skip for single-side queries
+_SET_KW = ("set of", "set of 2", "pair", " 2pcs", " 2 pcs", " 4pcs", " 4 pcs",
+           " 4pc", " 4 pc", "front and rear", "front & rear", " kit ", " combo ",
+           "both sides", "left and right", "left & right", "driver and passenger",
+           "driver & passenger")
+
+
+def _is_set_listing(title: str) -> bool:
+    lower = title.lower()
+    return any(kw in lower for kw in _SET_KW)
+
+
 def _matches_side(title: str, side: str | None) -> bool:
-    """Check if listing title is compatible with requested side."""
+    """Check if listing title is compatible with requested side (permissive — excludes wrong-side-only)."""
     if not side:
         return True
     lower = title.lower()
@@ -148,6 +172,13 @@ def _matches_side(title: str, side: str | None) -> bool:
         wrong = ["left only", "lh only", "driver only", "left driver"]
         return not any(w in lower for w in wrong)
     return True
+
+
+def _title_contains_side(title: str, side: str) -> bool:
+    """Strict check — title must explicitly mention the correct side keyword."""
+    lower = title.lower()
+    kws = _SIDE_RIGHT_KW if side == "right" else _SIDE_LEFT_KW
+    return any(kw in lower for kw in kws)
 
 
 
@@ -214,6 +245,9 @@ EBAY_CATEGORY_AUTO_PARTS = "6030"    # Car & Truck Parts & Accessories (broad)
 BODY_PANEL_MIN_PRICES: dict[str, float] = {
     "hood": 80.0,
     "fender": 50.0,
+    "rear bumper": 80.0,        # full assembly — end cap sets at $30 should be excluded
+    "front bumper": 80.0,
+    "bumper": 80.0,
     "bumper cover": 90.0,       # raised: real covers cost $90-300, $65 = accessory
     "front bumper cover": 90.0,
     "rear bumper cover": 70.0,
@@ -248,10 +282,13 @@ BODY_PART_TITLE_EXCLUDES = {
     "overlay", "cover overlay", "vinyl",
     "tow hook", "tow eye",
     # Bumper accessories that are NOT a full bumper cover
-    "guard", "step pad", "protector", "applique", "end cap",
+    "guard", "step pad", "protector", "applique", "end cap", "end caps",
+    "corner cap", "corner piece", "corner trim",
     "air dam", "skid plate", "deflector", "trim piece", "filler panel",
     "tow cover", "license bracket", "license plate bracket",
     "chrome", "chrome trim", "chrome cover",
+    # Multi-piece sets that are NOT a single assembly
+    " pair", "set pair", "set of 2", "set of 4", "2-piece", "4-piece",
     # Running board / step-bar specific exclusions
     "hitch step", "hitch-step", "hitch mount step", "receiver step",
     "bed step", "bumper step", "tire step", "tailgate step",
@@ -417,6 +454,38 @@ async def search_ebay(
             us_results.append(result)
         else:
             intl_results.append(result)
+
+    # ── Bug 4: Side-specific filtering with set exclusion ────────────────────
+    # When a specific side is requested for a single-side part type:
+    #   1. Exclude "set"/"pair" listings
+    #   2. Require title to contain an explicit side keyword (right/left/RH/LH/etc.)
+    # If strict filtering leaves no results, fall back to all results but mark
+    # them as set_fallback so the Excel can show "Solo disponible como set/genérico".
+    _part_en_for_side = (part_english or "").lower()
+    _is_single_side_part = any(kw in _part_en_for_side for kw in _SINGLE_SIDE_PARTS)
+
+    if side and _is_single_side_part:
+        _all_combined = sorted(us_results + intl_results, key=lambda x: x["total_price"])
+        # First try: no-set + correct-side keyword in title
+        _strict = [
+            r for r in _all_combined
+            if not _is_set_listing(r["title"]) and _title_contains_side(r["title"], side)
+        ]
+        # Second try: no-set (accept side-neutral titles like "Toyota Tacoma Mud Flap")
+        _no_set = [r for r in _all_combined if not _is_set_listing(r["title"])]
+
+        if _strict:
+            final_pool = _strict
+        elif _no_set:
+            final_pool = _no_set
+        else:
+            # Only sets available — use them but flag
+            for r in _all_combined:
+                r["set_fallback"] = True
+            final_pool = _all_combined
+            logger.info(f"eBay: only set/pair listings found for '{part_english}' ({side}) — flagging")
+
+        return sorted(final_pool, key=lambda x: x["total_price"])[:limit]
 
     # Prefer US sellers, allow international if >30% cheaper
     all_results = []

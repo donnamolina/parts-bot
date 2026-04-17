@@ -1016,12 +1016,89 @@ async def lookup_oem_by_vin(
                 if not (cand_norm_words & _hw_query_words):
                     c["score"] = max(0.0, c["score"] - 50)
 
-        # ── Bumper assembly query: penalise sub-components (covers, caps, upper trims) ──
-        # When the query is for a full bumper assembly (no "cover" in the query),
-        # down-score candidates whose name is clearly a sub-component:
-        # "COVER, REAR BUMPER" / "CAP, BUMPER" / "PLATE, REAR BUMPER" etc.
-        # The full assembly is typically named "BUMPER ASSY" or "BUMPER, REAR".
+        # ── Bug 1: Assembly-query preference — hard-exclude structural sub-components,
+        # soft-prefer ASSY/COMPLETE candidates when the query is for the whole assembly.
+        # Covers bumper, hood, door, fender, grille, mirror, tail light, headlight, etc.
+        # ────────────────────────────────────────────────────────────────────────────────
+        _FULL_ASSEMBLY_QUERIES: frozenset[str] = frozenset({
+            "bumper", "rear bumper", "front bumper",
+            "hood", "door", "fender", "grille",
+            "tail light", "tail lamp", "headlight", "headlamp",
+            "mirror", "running board", "side step", "fog light",
+            "turn signal", "trunk", "tailgate",
+        })
+        # Parts that signal a structural sub-component — HARD exclude when querying for assembly
+        _SUBCOMP_HARD_EXCLUDE: tuple[str, ...] = (
+            "reinforcement", "rebar", "absorber", "energy absorber",
+            "brace", "stay", "mounting", "sub-assy", "subassy",
+            "filler", "spoiler", "moulding", "emblem", "badge", "guard",
+        )
+        # Assembly indicator keywords — SOFT prefer (+15)
+        _ASSY_PREFER_KW: tuple[str, ...] = ("assy", "assembly", "complete", "comp")
+
         _ql_lower = part_name_english.lower()
+        _is_full_assy_query = any(kw == _ql_lower or _ql_lower.endswith(" " + kw) or _ql_lower.startswith(kw + " ")
+                                  for kw in _FULL_ASSEMBLY_QUERIES) or \
+                              any(kw in _ql_lower for kw in _FULL_ASSEMBLY_QUERIES)
+        # Don't apply if query is explicitly for a sub-component
+        if any(kw in _ql_lower for kw in _HARDWARE_QUERY_KW):
+            _is_full_assy_query = False
+
+        if _is_full_assy_query:
+            _filtered_cands = []
+            for c in candidates:
+                cname = (c.get("part_name") or "").lower()
+                cnorm = _normalize(cname).lower()
+                # Hard-exclude structural sub-components.
+                # Check BOTH original name and normalized name — normalization expands
+                # "SUB-ASSY" → "SUB-assembly", so "sub-assy" only matches in the original.
+                if (any(kw in cname for kw in _SUBCOMP_HARD_EXCLUDE) or
+                        any(kw in cnorm for kw in _SUBCOMP_HARD_EXCLUDE)):
+                    logger.debug(f"7zap assy filter: hard-excluding '{c['part_name']}' (sub-component)")
+                    continue
+                # Soft-prefer assembly-level parts
+                if any(kw in cnorm for kw in _ASSY_PREFER_KW):
+                    c["score"] = min(100.0, c["score"] + 15)
+                    logger.debug(f"7zap assy filter: +15 boost for '{c['part_name']}' score→{c['score']:.0f}")
+                _filtered_cands.append(c)
+
+            # Cross-word check: for specific assembly queries, also require the candidate
+            # name to contain the primary assembly noun. Prevents "STRIPE, REAR BODY" or
+            # "GATE SUB-ASSY" from winning a "rear bumper" query when the actual assembly
+            # is not in the catalog for this VIN.
+            _ASSEMBLY_PRIMARY_WORDS: dict[str, tuple[str, ...]] = {
+                "bumper": ("bumper",),
+                "hood": ("hood", "bonnet"),
+                "fender": ("fender", "wing"),
+                "grille": ("grille", "grill", "grp"),
+                "headlight": ("headlight", "headlamp", "lamp"),
+                "tail light": ("tail", "lamp", "light"),
+                "mirror": ("mirror",),
+            }
+            for _assy_kw, _primary_words in _ASSEMBLY_PRIMARY_WORDS.items():
+                if _assy_kw in _ql_lower:
+                    _cross_filtered = [
+                        c for c in _filtered_cands
+                        if any(pw in (c.get("part_name") or "").lower() for pw in _primary_words)
+                    ]
+                    if _cross_filtered:
+                        _filtered_cands = _cross_filtered
+                        logger.debug(f"7zap cross-word filter: {len(_filtered_cands)} candidates kept for '{_assy_kw}'")
+                    break  # only apply one cross-filter
+
+            if _filtered_cands:
+                candidates = _filtered_cands
+            else:
+                # No valid assembly candidates — return empty so engine falls back to
+                # name-based eBay search instead of returning a wrong sub-component.
+                cache.store_negative(part_key)
+                return OemLookupResult(
+                    error=f"7zap: no full assembly found for '{part_name_english}' "
+                          "(only sub-components in catalog for this VIN)"
+                )
+
+        # ── Bumper assembly: also penalise cosmetic sub-components (cover/cap/trim) ──
+        # Softer penalty (-40) rather than hard-exclude — these may be the only option.
         _bumper_assembly_query = (
             "bumper" in _ql_lower
             and "cover" not in _ql_lower
@@ -1032,15 +1109,12 @@ async def lookup_oem_by_vin(
             _SUB_KW = ("cover", "cap", "upr", "lower", "upper", "plate",
                        "trim", "extension", "end", "insert", "deflector",
                        "absorber step", "step pad")
-            _ASSY_KW = ("assy", "assembly", "bumper, rear", "bumper, front",
-                        "rear bumper", "front bumper")
             for c in candidates:
                 cname = (c.get("part_name") or "").lower()
                 cnorm = _normalize(cname).lower()
                 _is_sub = any(kw in cname for kw in _SUB_KW)
-                # "COVER, REAR BUMPER" contains "rear bumper" but IS a sub-component.
-                # Only consider it an assembly if "bumper" is the primary noun —
-                # i.e. first word of the name (before any comma) is "bumper".
+                # Only consider it an assembly if "bumper" is the primary noun
+                # (first word before any comma).
                 _first_word = cnorm.split(",")[0].strip().split()
                 _first_word = _first_word[0] if _first_word else ""
                 _is_assy = (
@@ -1051,7 +1125,7 @@ async def lookup_oem_by_vin(
                 if _is_sub and not _is_assy:
                     c["score"] = max(0.0, c["score"] - 40)
                     logger.debug(
-                        f"7zap bumper sub-component penalty: '{c['part_name']}' score→{c['score']:.0f}"
+                        f"7zap bumper cover penalty: '{c['part_name']}' score→{c['score']:.0f}"
                     )
 
         # ── Running board / step bar: reject candidates without step-related keywords ──
