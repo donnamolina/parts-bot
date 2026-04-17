@@ -14,6 +14,8 @@ import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+_SONNET_MODEL = os.environ.get("ANTHROPIC_SONNET_MODEL", "claude-sonnet-4-6")
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from search.engine import search_all_parts
@@ -110,7 +112,7 @@ async def sonnet_verify_results(vehicle_info: dict, results: list) -> list:
     try:
         client = anthropic.Anthropic(api_key=api_key)
         msg = client.messages.create(
-            model="claude-sonnet-4-6",
+            model=_SONNET_MODEL,
             max_tokens=512,
             messages=[{"role": "user", "content": prompt}]
         )

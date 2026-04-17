@@ -43,6 +43,7 @@ const AUTH_DIR = path.join(__dirname, 'auth_info');
 const OUTPUT_DIR = path.join(__dirname, 'output');
 const LOG_DIR = path.join(__dirname, 'logs');
 const PYTHON = path.join(__dirname, '.venv', 'bin', 'python3');
+const SONNET_MODEL = process.env.ANTHROPIC_SONNET_MODEL || "claude-sonnet-4-6";
 
 // Ensure directories exist
 [AUTH_DIR, OUTPUT_DIR, LOG_DIR].forEach(d => fs.mkdirSync(d, { recursive: true }));
@@ -451,7 +452,7 @@ Si no se entiende:
 
   try {
     const msg = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      model: SONNET_MODEL,
       max_tokens: 256,
       system: 'Respond ONLY with valid JSON. No prose, no explanation, no markdown fences.',
       messages: [{ role: 'user', content: prompt }],
@@ -486,7 +487,7 @@ async function handleChat(jid, userMessage) {
   appendHistory(jid, 'user', userMessage);
   const history = getHistory(jid);
   const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6',
+    model: SONNET_MODEL,
     max_tokens: 1024,
     system: CHAT_SYSTEM_PROMPT,
     messages: history,
@@ -948,7 +949,7 @@ async function handleMessage(sock, msg) {
   if (session.state === 'awaiting_vehicle' && textContent && !hasMedia) {
     try {
       const msg = await anthropic.messages.create({
-        model: 'claude-sonnet-4-6',
+        model: SONNET_MODEL,
         max_tokens: 200,
         system: `You parse vehicle identification messages for a DR auto parts bot.
 The user is correcting a failed vehicle parse. Their message is one of:
