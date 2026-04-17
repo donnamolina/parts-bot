@@ -68,8 +68,15 @@ async def sonnet_verify_results(vehicle_info: dict, results: list) -> list:
         side = part.get("side") or "none"
         position = part.get("position") or ""
 
-        if best:
-            price = best.get("total_price") or best.get("price", 0)
+        # Bug 10: manual-review parts skip eBay pipeline and have price=None
+        if r.get("manual_review"):
+            pn = (best or {}).get("part_number", "") or "no OEM#"
+            lines.append(
+                f"{i}. DR:\"{name_orig}\" EN:\"{name_en}\" side:{side} pos:{position} "
+                f"| MANUAL REVIEW ({r.get('manual_review')}, {pn})"
+            )
+        elif best:
+            price = best.get("total_price") or best.get("price", 0) or 0
             source = best.get("source", "?")
             pn = best.get("part_number", "") or "no OEM#"
             lines.append(
