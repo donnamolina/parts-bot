@@ -28,6 +28,7 @@ from .rockauto_search import (
 )
 from .cost_calculator import calculate_landed_cost
 from .manual_review import classify_part, MANUAL_REVIEW_NOTES
+from .price_ranges import check_price_anomaly
 
 logger = logging.getLogger("parts-bot.engine")
 
@@ -312,6 +313,31 @@ async def search_single_part(
                 us_shipping_usd=shipping,
                 part_name_english=part_english,
             )
+
+            # Bug 13: flag (never reject/cap) vehicle-class-aware price anomalies.
+            _anomaly = check_price_anomaly(
+                part_name=part_english,
+                make=vehicle_info.get("make", ""),
+                price_usd=best.get("price"),
+                shipping_usd=shipping,
+            )
+            if _anomaly:
+                best["price_anomaly"] = _anomaly
+                # Downgrade confidence when the anomaly is extreme so human
+                # reviewers see a visual warning without losing the pick.
+                if _anomaly["magnitude"] == "extreme":
+                    if best.get("confidence") == "green":
+                        best["confidence"] = "yellow"
+                    elif best.get("confidence") in (None, ""):
+                        best["confidence"] = "yellow"
+                _existing_note = best.get("note") or ""
+                _sep = " | " if _existing_note else ""
+                best["note"] = f"{_existing_note}{_sep}{_anomaly['note']}"
+                logger.info(
+                    f"Price anomaly flagged for '{part_english}' "
+                    f"({_anomaly['severity']}/{_anomaly['magnitude']}): "
+                    f"${_anomaly['price_usd']:.0f} vs {_anomaly['expected']}"
+                )
 
     except Exception as e:
         logger.error(f"Error searching '{part_english}': {e}")
