@@ -944,6 +944,33 @@ async def lookup_oem_by_vin(
                 elif _query_is_rear and _cand_is_front and not _cand_is_rear:
                     c["score"] = max(0.0, c["score"] - 35)
 
+        # ── Context mismatch penalties ──
+        for c in candidates:
+            cname = (c.get("part_name") or "").lower()
+            # "license plate" candidate for non-license queries
+            if "license" not in _req_lower and "plate" not in _req_lower:
+                if "license" in cname:
+                    c["score"] = max(0.0, c["score"] - 50)
+            # "door" molding candidate when query is for a fender/flare/bumper part
+            if "fender" in _req_lower or "flare" in _req_lower:
+                if "door" in cname and "fender" not in cname and "flare" not in cname:
+                    c["score"] = max(0.0, c["score"] - 50)
+
+        # ── Hardware query / assembly candidate mismatch penalty ──
+        # If the query is for a sub-component (bracket, adjuster, slider, mount)
+        # but the top candidate is the full assembly (no hardware words in its name),
+        # penalise -50 so it falls below threshold and eBay falls back to name search.
+        _hw_query_words = {"bracket", "adjuster", "slider", "mount", "mounting",
+                           "retainer", "clip", "hinge", "latch", "absorber", "reflector"}
+        _query_hw_tokens = set(_re_norm.sub(r'[^a-z]', ' ', part_name_english.lower()).split())
+        if _query_hw_tokens & _hw_query_words:
+            for c in candidates:
+                cand_norm_words = set(
+                    _re_norm.sub(r'[^a-z]', ' ', _normalize(c.get("part_name", "")).lower()).split()
+                )
+                if not (cand_norm_words & _hw_query_words):
+                    c["score"] = max(0.0, c["score"] - 50)
+
         # ── Side filter ──
         if req_side:
             side_specific = [c for c in candidates if c["side"] == req_side]

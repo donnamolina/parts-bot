@@ -137,8 +137,9 @@ async def search_single_part(
         if _use_7zap:
             try:
                 from .oem_lookup_7zap import lookup_oem_by_vin, SevenZapAuthError
-                # Prepend side so 7zap sets req_side correctly and caches per-side
-                _zap_query = f"{side} {part_english}" if side else part_english
+                # Prepend side + position so 7zap sets req_side and direction correctly, and caches per-side/pos
+                _side_pos = " ".join(filter(None, [side, position]))
+                _zap_query = f"{_side_pos} {part_english}" if _side_pos else part_english
                 _zap = await lookup_oem_by_vin(vin, _zap_query, make_hint=vehicle_info.get("make"))
                 if _zap.oem_number:
                     oem_number = _zap.oem_number
