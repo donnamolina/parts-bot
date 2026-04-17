@@ -1,3 +1,7 @@
+// CANONICAL PM2 CONFIG for parts-bot (Pieza Finder).
+// Previously this repo had two configs (ecosystem.config.js + pm2.config.js).
+// As of 2026-04-17 pre-v11 cleanup: this file is the single source of truth.
+// Start/reload with:  pm2 startOrReload /opt/parts-bot/pm2.config.js
 module.exports = {
   apps: [{
     name: 'parts-bot',
