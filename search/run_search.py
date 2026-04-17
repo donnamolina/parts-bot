@@ -289,10 +289,12 @@ async def main():
     if _verify_enabled and _api_key:
         _to_verify = []
         for _r in results:
-            _oem_src = _r.get("oem_source", "") or ""
+            # Bug 16 fix: verify whenever we have a usable best_option (title+price),
+            # regardless of OEM source (7zap / RockAuto / name_fallback / Cache).
+            # The riskiest paths are the non-7zap ones where name-based search is noisier.
             _best = _r.get("best_option") or {}
             _part = _r.get("part", {}) or {}
-            if _oem_src.startswith("7zap") and _best.get("price") and _best.get("title"):
+            if _best.get("price") and _best.get("title"):
                 _to_verify.append((_r, _part, _best))
 
         if _to_verify:
@@ -384,6 +386,21 @@ async def main():
                     if isinstance(_v, Exception):
                         continue
                     _part_en = _p.get("name_english", "")
+                    # Bug 16 guardrail: if name-fallback retry ALSO comes back WRONG_PART,
+                    # mark as N/F (clear listing). Do NOT retry with another search.
+                    if (_v.get("verdict") or "") == "WRONG_PART":
+                        _r["best_option"] = None
+                        _r["ebay"] = None
+                        _r["oem_source"] = "name_fallback_rejected"
+                        _r["oem_confidence"] = "red"
+                        _r["sonnet_verify"] = _v
+                        _r.pop("landed_cost", None)
+                        logger.info(
+                            f"WRONG_PART retry '{_part_en}': "
+                            f"name-fallback ALSO wrong → marked N/F (no further retry). "
+                            f"note={_v.get('note','')}"
+                        )
+                        continue
                     # Replace result with name-based listing, clear bad OEM#
                     _listing["part_number"] = ""
                     _r["ebay"] = _listing
