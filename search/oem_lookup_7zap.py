@@ -183,6 +183,7 @@ _HARDWARE_WORDS: frozenset[str] = frozenset({
     "hitch",        # tow hitch cover — not a bumper cover
     "crossmember",  # structural crossmember — not a front-end assembly
     "draincock",    # radiator draincock
+    "spat",         # FCA "SPAT, REAR" = exterior ornamentation trim, not a bumper panel
 })
 
 # Query keywords that mark an assembly/main-component query → apply blocklist
