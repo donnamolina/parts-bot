@@ -39,21 +39,32 @@ def main():
     results = data.get("results", [])
 
     count = 0
+    skipped = 0
     for r in results:
         part = r.get("part", {})
         part_name = part.get("name_english", "")
-        if r.get("best_option") and part_name:
-            upsert_cached_result_safe(
-                args.vehicle_make,
-                args.vehicle_model,
-                args.vehicle_year,
-                part_name,
-                r,
-                verified_by_correction=False,
-            )
-            count += 1
+        if not part_name:
+            skipped += 1
+            continue
 
-    print(json.dumps({"cached": count}))
+        # Bug 19 fix: don't cache N/F rows as verified. A `listo` on a result
+        # with 1-2 "NO RESULTS" rows shouldn't re-cache those as verified_by_correction.
+        best = r.get("best_option")
+        if not best or best.get("price_usd") in (None, "N/F") or best.get("price") in (None, 0):
+            skipped += 1
+            continue
+
+        upsert_cached_result_safe(
+            args.vehicle_make,
+            args.vehicle_model,
+            args.vehicle_year,
+            part_name,
+            r,
+            verified_by_correction=False,
+        )
+        count += 1
+
+    print(json.dumps({"cached": count, "skipped": skipped}))
 
 
 if __name__ == "__main__":
