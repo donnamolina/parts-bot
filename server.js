@@ -45,6 +45,39 @@ const LOG_DIR = path.join(__dirname, 'logs');
 const PYTHON = path.join(__dirname, '.venv', 'bin', 'python3');
 const SONNET_MODEL = process.env.ANTHROPIC_SONNET_MODEL || "claude-sonnet-4-6";
 
+// ─── formatPartsList helper ─────────────────────────────────────────────────
+// Single source of truth for the confirmation/review bulleted list.
+// Replaces 4 near-duplicate renderer blocks across server.js (pre-v11 cleanup).
+// opts: { title, vehicleHeader, vinLine, showEn, showQty, showPrice, footer }
+function formatPartsList(parts, vehicle, opts = {}) {
+  const {
+    header = null,        // e.g. `🚗 *Vehículo:* 2016 Toyota Tacoma\n...`
+    title = '📋 *Piezas:*',
+    showEn = true,
+    showQty = true,
+    showPrice = true,
+    footer = '',
+  } = opts;
+
+  let out = '';
+  if (header) out += header;
+  out += `${title}\n`;
+  out += '─────────────────────\n';
+
+  parts.forEach((p, i) => {
+    const side = p.side ? ` (${p.side === 'left' ? 'Izq' : 'Der'})` : '';
+    const pos = p.position ? ` ${p.position === 'front' ? 'Del' : 'Tras'}` : '';
+    const en = (showEn && p.name_english) ? ` → ${p.name_english}` : '';
+    const qty = (showQty && p.quantity && p.quantity > 1) ? ` x${p.quantity}` : '';
+    const price = (showPrice && p.local_price) ? ` — RD$${p.local_price.toLocaleString()}` : '';
+    out += `${i + 1}. ${p.name_original || p.name_dr}${side}${pos}${en}${qty}${price}\n`;
+  });
+
+  out += '─────────────────────\n';
+  if (footer) out += footer;
+  return out;
+}
+
 // Ensure directories exist
 [AUTH_DIR, OUTPUT_DIR, LOG_DIR].forEach(d => fs.mkdirSync(d, { recursive: true }));
 
@@ -643,27 +676,16 @@ async function processSingleMedia(sock, jid, mediaPath, ext) {
     const vehicleStr = `${vehicle.year || ''} ${vehicle.make || ''} ${vehicle.model || ''}`.trim();
     appendHistory(jid, 'assistant', `Procesé la cotización — ${vehicleStr || 'vehículo desconocido'}, ${extractResult.parts.length} piezas. Voy a confirmar con el usuario.`);
 
-    let confirmMsg = `🚗 *Vehículo:* ${vehicle.year || '?'} ${vehicle.make || '?'} ${vehicle.model || '?'}\n`;
-    confirmMsg += `🔑 *VIN:* ${vin}\n\n`;
-    confirmMsg += `📋 *Piezas encontradas:*\n`;
-    confirmMsg += '─────────────────────\n';
-
-    extractResult.parts.forEach((p, i) => {
-      const side = p.side ? ` (${p.side === 'left' ? 'Izq' : 'Der'})` : '';
-      const pos = p.position ? ` ${p.position === 'front' ? 'Del' : 'Tras'}` : '';
-      const price = p.local_price ? ` — RD$${p.local_price.toLocaleString()}` : '';
-      const en = p.name_english ? ` → ${p.name_english}` : '';
-      const qty = (p.quantity && p.quantity > 1) ? ` x${p.quantity}` : '';
-      confirmMsg += `${i + 1}. ${p.name_original || p.name_dr}${side}${pos}${en}${qty}${price}\n`;
-    });
-
-    confirmMsg += '─────────────────────\n';
-    confirmMsg += t(jid, 'confirm_prompt');
-    confirmMsg += '\n✏️ _Para corregir cantidad envia p.ej: "2 bumper delantero"_';
-
+    let footer = t(jid, 'confirm_prompt');
+    footer += '\n✏️ _Para corregir cantidad envia p.ej: "2 bumper delantero"_';
     if (queueRemaining > 0) {
-      confirmMsg += `\n\n_📋 ${queueRemaining} cotización${queueRemaining !== 1 ? 'es' : ''} más en cola_`;
+      footer += `\n\n_📋 ${queueRemaining} cotización${queueRemaining !== 1 ? 'es' : ''} más en cola_`;
     }
+    const confirmMsg = formatPartsList(extractResult.parts, vehicle, {
+      header: `🚗 *Vehículo:* ${vehicle.year || '?'} ${vehicle.make || '?'} ${vehicle.model || '?'}\n🔑 *VIN:* ${vin}\n\n`,
+      title: '📋 *Piezas encontradas:*',
+      footer,
+    });
 
     await sendText(sock, jid, confirmMsg);
 
@@ -981,16 +1003,13 @@ Return ONLY valid JSON, no other text:
           session.extractedData = extractResult;
           session.state = 'awaiting_confirmation';
           const v = extractResult.vehicle || {};
-          let confirmMsg = `🚗 *Vehículo:* ${v.year || '?'} ${v.make || '?'} ${v.model || '?'}\n\n📋 *Piezas (${extractResult.parts.length}):*\n`;
-          confirmMsg += '─────────────────────\n';
-          extractResult.parts.forEach((p, i) => {
-            const side = p.side ? ` (${p.side === 'left' ? 'Izq' : 'Der'})` : '';
-            const pos = p.position ? ` ${p.position === 'front' ? 'Del' : 'Tras'}` : '';
-            const price = p.local_price ? ` — RD$${p.local_price.toLocaleString()}` : '';
-            confirmMsg += `${i + 1}. ${p.name_original || p.name_dr}${side}${pos}${price}\n`;
+          const confirmMsg = formatPartsList(extractResult.parts, v, {
+            header: `🚗 *Vehículo:* ${v.year || '?'} ${v.make || '?'} ${v.model || '?'}\n\n`,
+            title: `📋 *Piezas (${extractResult.parts.length}):*`,
+            showEn: false,
+            showQty: false,
+            footer: t(jid, 'confirm_prompt'),
           });
-          confirmMsg += '─────────────────────\n';
-          confirmMsg += t(jid, 'confirm_prompt');
           await sendText(sock, jid, confirmMsg);
         } else {
           resetSession(jid);
@@ -1330,20 +1349,14 @@ Return ONLY valid JSON, no other text:
           if (parsed.vehicle) session.extractedData.vehicle = { ...session.extractedData.vehicle, ...parsed.vehicle };
           if (parsed.vin) session.extractedData.vin = parsed.vin;
           const v = session.extractedData.vehicle || {};
-          let confirmMsg = `✅ *Vehículo actualizado:* ${v.year || '?'} ${v.make || '?'} ${v.model || '?'}\n`;
-          if (session.extractedData.vin) confirmMsg += `🔑 *VIN:* ${session.extractedData.vin}\n`;
-          confirmMsg += `\n📋 *Piezas:*\n`;
-          confirmMsg += '─────────────────────\n';
-          session.extractedData.parts.forEach((p, i) => {
-            const side = p.side ? ` (${p.side === 'left' ? 'Izq' : 'Der'})` : '';
-            const pos = p.position ? ` ${p.position === 'front' ? 'Del' : 'Tras'}` : '';
-            const en = p.name_english ? ` → ${p.name_english}` : '';
-            const qty = (p.quantity && p.quantity > 1) ? ` x${p.quantity}` : '';
-            const price = p.local_price ? ` — RD$${p.local_price.toLocaleString()}` : '';
-            confirmMsg += `${i + 1}. ${p.name_original || p.name_dr}${side}${pos}${en}${qty}${price}\n`;
+          let header = `✅ *Vehículo actualizado:* ${v.year || '?'} ${v.make || '?'} ${v.model || '?'}\n`;
+          if (session.extractedData.vin) header += `🔑 *VIN:* ${session.extractedData.vin}\n`;
+          header += `\n`;
+          const confirmMsg = formatPartsList(session.extractedData.parts, v, {
+            header,
+            title: '📋 *Piezas:*',
+            footer: t(jid, 'confirm_prompt'),
           });
-          confirmMsg += '─────────────────────\n';
-          confirmMsg += t(jid, 'confirm_prompt');
           await sendText(sock, jid, confirmMsg);
           return;
         }
@@ -1371,21 +1384,11 @@ Return ONLY valid JSON, no other text:
 
         // Re-show confirmation with updated list
         const vehicle = session.extractedData.vehicle || {};
-        let confirmMsg = `🚗 *Vehículo:* ${vehicle.year || '?'} ${vehicle.make || '?'} ${vehicle.model || '?'}\n\n`;
-        confirmMsg += `📋 *Piezas actualizadas:*\n`;
-        confirmMsg += '─────────────────────\n';
-
-        session.extractedData.parts.forEach((p, i) => {
-          const side = p.side ? ` (${p.side === 'left' ? 'Izq' : 'Der'})` : '';
-          const pos = p.position ? ` ${p.position === 'front' ? 'Del' : 'Tras'}` : '';
-          const en = p.name_english ? ` → ${p.name_english}` : '';
-          const qty = (p.quantity && p.quantity > 1) ? ` x${p.quantity}` : '';
-          const price = p.local_price ? ` — RD$${p.local_price.toLocaleString()}` : '';
-          confirmMsg += `${i + 1}. ${p.name_original || p.name_dr}${side}${pos}${en}${qty}${price}\n`;
+        const confirmMsg = formatPartsList(session.extractedData.parts, vehicle, {
+          header: `🚗 *Vehículo:* ${vehicle.year || '?'} ${vehicle.make || '?'} ${vehicle.model || '?'}\n\n`,
+          title: '📋 *Piezas actualizadas:*',
+          footer: t(jid, 'confirm_prompt'),
         });
-
-        confirmMsg += '─────────────────────\n';
-        confirmMsg += t(jid, 'confirm_prompt');
 
         await sendText(sock, jid, confirmMsg);
 
@@ -1604,21 +1607,15 @@ Return ONLY valid JSON, no other text:
         appendHistory(jid, 'assistant', `Procesé la lista — ${vehicleStrTxt || 'vehículo desconocido'}, ${extractResult.parts.length} piezas. Voy a confirmar con el usuario.`);
 
         const vin = extractResult.vin || 'N/A';
-        let confirmMsg = `🚗 *Vehículo:* ${vehicle.year || '?'} ${vehicle.make || '?'} ${vehicle.model || '?'}\n`;
-        if (vin !== 'N/A') confirmMsg += `🔑 *VIN:* ${vin}\n`;
-        confirmMsg += `\n📋 *Piezas:*\n`;
-        confirmMsg += '─────────────────────\n';
-
-        extractResult.parts.forEach((p, i) => {
-          const side = p.side ? ` (${p.side === 'left' ? 'Izq' : 'Der'})` : '';
-          const pos = p.position ? ` ${p.position === 'front' ? 'Del' : 'Tras'}` : '';
-          const en = p.name_english ? ` → ${p.name_english}` : '';
-          const qty = (p.quantity && p.quantity > 1) ? ` x${p.quantity}` : '';
-          confirmMsg += `${i + 1}. ${p.name_original}${side}${pos}${en}${qty}\n`;
+        let header = `🚗 *Vehículo:* ${vehicle.year || '?'} ${vehicle.make || '?'} ${vehicle.model || '?'}\n`;
+        if (vin !== 'N/A') header += `🔑 *VIN:* ${vin}\n`;
+        header += `\n`;
+        const confirmMsg = formatPartsList(extractResult.parts, vehicle, {
+          header,
+          title: '📋 *Piezas:*',
+          showPrice: false,
+          footer: t(jid, 'confirm_prompt'),
         });
-
-        confirmMsg += '─────────────────────\n';
-        confirmMsg += t(jid, 'confirm_prompt');
 
         await sendText(sock, jid, confirmMsg);
 
