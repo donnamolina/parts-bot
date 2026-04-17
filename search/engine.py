@@ -2,7 +2,7 @@
 Search Engine Orchestrator — searches ALL parts in PARALLEL.
 
 This is the main entry point called by the WhatsApp bot.
-It coordinates VIN decode, dictionary translation, RockAuto + eBay searches,
+It coordinates VIN decode, dictionary translation, 7zap OEM lookup, eBay search,
 and landed cost calculation for every part.
 
 Key architecture: asyncio.gather with semaphore for parallel execution.
@@ -17,15 +17,9 @@ import sys
 from typing import Optional
 from pathlib import Path
 
-from rockauto_api import RockAutoClient
-
 from .dictionary import translate_part, PART_TO_CATEGORY
 from .vin_decode import decode_vin
 from .ebay_search import search_ebay, get_ebay_token
-from .rockauto_search import (
-    search_rockauto, resolve_vehicle,
-    load_cache as load_ra_cache, save_cache as save_ra_cache,
-)
 from .cost_calculator import calculate_landed_cost
 from .manual_review import classify_part, MANUAL_REVIEW_NOTES
 from .price_ranges import check_price_anomaly
@@ -86,15 +80,12 @@ async def search_single_part(
     part: dict,
     vehicle_info: dict,
     ebay_token: str,
-    ra_client: RockAutoClient,
-    ra_cache: dict,
     on_progress: Optional[callable] = None,
 ) -> dict:
-    """Search one part across RockAuto + eBay. Called in parallel for all parts."""
+    """Search one part: 7zap OEM lookup + eBay. Called in parallel for all parts."""
 
     result = {
         "part": part,
-        "rockauto": None,
         "ebay": None,
         "best_option": None,
         "landed_cost": None,
@@ -133,8 +124,8 @@ async def search_single_part(
         return True
 
     try:
-        # ── Step 1: Resolve OEM# ─────────────────────────────────────────────
-        # Priority: part dict → 7zap (VIN-exact) → RockAuto fallback
+        # ── Step 1: Resolve OEM# via 7zap (VIN-exact) ────────────────────────
+        # Priority: part dict → 7zap. No more RockAuto fallback (removed v11).
         oem_number = part.get("part_number") or part.get("oem_number") or ""
         vin = vehicle_info.get("vin", "")
 
@@ -150,8 +141,7 @@ async def search_single_part(
                 f"{_manual_class} — skipping eBay"
             )
 
-        import os as _os
-        _use_7zap = _os.getenv("OEM_LOOKUP_SOURCE", "7zap").lower() == "7zap" and bool(vin)
+        _use_7zap = bool(vin)
 
         if _use_7zap:
             try:
@@ -177,12 +167,10 @@ async def search_single_part(
                     )
                 else:
                     logger.debug(f"7zap no result for '{part_english}': {_zap.error}")
-                    _use_7zap = False  # trigger RockAuto fallback below
             except SevenZapAuthError as _e:
-                logger.error(f"7zap cookies expired — falling back to RockAuto: {_e}")
-                _use_7zap = False
+                logger.error(f"7zap cookies expired: {_e}")
 
-        # Bug 10: For manual-review parts, stop here — skip RockAuto fallback and eBay.
+        # Bug 10: For manual-review parts, stop here — skip eBay entirely.
         # Still return a minimal best_option with the OEM# (if 7zap found one) so the
         # Excel row shows the part_number for dealer quoting.
         if _manual_class:
@@ -203,34 +191,6 @@ async def search_single_part(
                     "delivery_days_max": None,
                 }
             return result
-
-        # RockAuto: fallback when 7zap is disabled/failed/returned nothing.
-        # Still used for fitment data even when 7zap returns an OEM#.
-        # Its results are NEVER shown as a purchase source.
-        if not _use_7zap or not oem_number:
-            ra_results, ra_error = await search_rockauto(
-                client=ra_client,
-                make=vehicle_info["make"],
-                year=vehicle_info["year"],
-                model=vehicle_info["model"],
-                carcode=vehicle_info.get("carcode", ""),
-                part_query=full_query,
-                side=side,
-            )
-            if ra_results:
-                result["rockauto"] = ra_results[0]
-                ra_oem = ra_results[0].get("part_number", "")
-                if _is_real_oem(ra_oem) and not oem_number:
-                    oem_number = ra_oem
-            elif ra_error and not oem_number:
-                result["error"] = f"RockAuto: {ra_error}"
-
-            # Platform validation only on RockAuto-sourced OEM# (7zap is VIN-exact)
-            if oem_number and not result.get("oem_source", "").startswith("7zap"):
-                mismatch = _check_platform_mismatch(vin, oem_number)
-                if mismatch:
-                    result["oem_platform_mismatch"] = mismatch
-                    logger.warning(f"Platform mismatch for '{part_english}': OEM# {oem_number} → {mismatch}")
 
         # ── Step 2: Build eBay query — OEM# first, name-based as fallback ──
         name_query = (f"{vehicle_info['year']} {vehicle_info['make']} "
@@ -286,16 +246,13 @@ async def search_single_part(
             if ebay_results[0].get("set_fallback"):
                 result["set_fallback"] = True
 
-        # Step 3: Pick best option (cheapest across sources)
-        result["best_option"] = _pick_best_option(
-            result["rockauto"], result["ebay"], part
-        )
+        # Step 3: Pick best option (cheapest eBay listing)
+        result["best_option"] = _pick_best_option(result["ebay"], part)
 
         # Inject or clear OEM# in best_option based on whether OEM-based search succeeded.
         if result["best_option"]:
             if _ebay_used_name_fallback:
                 # Name-based fallback was used — OEM# was never validated against the listing.
-                # Clear it regardless of source (7zap or RockAuto).
                 result["best_option"]["part_number"] = ""
                 if result.get("oem_source", "").startswith("7zap"):
                     result["oem_source"] = "name_fallback"
@@ -346,8 +303,8 @@ async def search_single_part(
     return result
 
 
-def _pick_best_option(rockauto: dict | None, ebay: dict | None, part: dict) -> dict | None:
-    """Pick the best eBay listing. RockAuto is used only for OEM# — never as a purchase source."""
+def _pick_best_option(ebay: dict | None, part: dict) -> dict | None:
+    """Pick the best eBay listing — the only purchase source after v11."""
 
     if not (ebay and ebay.get("price")):
         return None
@@ -368,10 +325,6 @@ def _pick_best_option(rockauto: dict | None, ebay: dict | None, part: dict) -> d
         "delivery_days_max": ebay.get("delivery_days_max"),
     }
 
-    # Carry RockAuto OEM# forward so it shows in the results table
-    if rockauto and rockauto.get("part_number"):
-        best["part_number"] = rockauto["part_number"]
-
     return best
 
 
@@ -391,34 +344,6 @@ async def search_all_parts(
     Returns:
         List of result dicts, one per part.
     """
-    # Setup — configure proxy before creating client so httpx picks it up
-    proxy_url = os.getenv("ROCKAUTO_PROXY")
-    if proxy_url:
-        os.environ.setdefault("HTTPS_PROXY", proxy_url)
-        os.environ.setdefault("HTTP_PROXY", proxy_url)
-    ra_client = RockAutoClient(enable_caching=True)
-    ra_cache = load_ra_cache()
-
-    # Resolve vehicle on RockAuto (done once, cached)
-    try:
-        carcode, engine_desc, from_cache = await resolve_vehicle(
-            ra_client,
-            vehicle_info["make"],
-            vehicle_info["year"],
-            vehicle_info["model"],
-            ra_cache,
-        )
-        vehicle_info["carcode"] = carcode
-        vehicle_info["engine"] = engine_desc
-        logger.info(f"Vehicle resolved: {vehicle_info['year']} {vehicle_info['make']} "
-                     f"{vehicle_info['model']} | carcode={carcode} | "
-                     f"engine={engine_desc} | cached={from_cache}")
-    except Exception as e:
-        logger.warning(f"RockAuto vehicle resolution failed: {e}. "
-                        "Will search eBay only.")
-        vehicle_info["carcode"] = ""
-        vehicle_info["engine"] = ""
-
     # Get eBay token once for all searches
     try:
         ebay_token = await get_ebay_token()
@@ -435,7 +360,7 @@ async def search_all_parts(
         nonlocal found_count
         async with semaphore:
             result = await search_single_part(
-                part, vehicle_info, ebay_token, ra_client, ra_cache, on_progress
+                part, vehicle_info, ebay_token, on_progress
             )
             found_count += 1
             if on_progress:
@@ -456,7 +381,6 @@ async def search_all_parts(
         if isinstance(r, Exception):
             final_results.append({
                 "part": parts_list[i],
-                "rockauto": None,
                 "ebay": None,
                 "best_option": None,
                 "landed_cost": None,

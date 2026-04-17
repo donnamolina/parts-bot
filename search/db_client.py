@@ -217,7 +217,7 @@ def get_cached_result(vehicle_make: str, vehicle_model: str, vehicle_year: int,
                     "condition": "Unknown",
                 },
                 "landed_cost": snapshot.get("landed_cost"),
-                "rockauto": None,
+
                 "ebay": None,
                 "error": None,
             }

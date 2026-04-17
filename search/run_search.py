@@ -155,8 +155,7 @@ async def main():
         logger.info(f"Decoding VIN: {vin}")
         decoded = await decode_vin(vin)
         if not decoded.get("error"):
-            # NHTSA returns uppercase makes ("TOYOTA", "KIA") — normalize to title case
-            # so rockauto_api can match the vehicle catalog correctly.
+            # NHTSA returns uppercase makes ("TOYOTA", "KIA") — normalize to title case.
             raw_make = decoded["make"] or ""
             raw_model = decoded["model"] or ""
             vehicle_info = {
@@ -237,8 +236,8 @@ async def main():
 
     for i, part in enumerate(parts_list):
         cached = get_cached_result(make, model, year, part.get("name_english", ""))
-        # Invalidate cached results that have RockAuto as source — stored before
-        # RockAuto was removed as a purchase source; must re-search via eBay.
+        # Invalidate legacy cache rows that have RockAuto as source (RockAuto
+        # was fully removed in v11 — re-search via eBay instead).
         if cached and (cached.get("best_option") or {}).get("source") == "RockAuto":
             cached = None
         if cached:
@@ -290,7 +289,7 @@ async def main():
         _to_verify = []
         for _r in results:
             # Bug 16 fix: verify whenever we have a usable best_option (title+price),
-            # regardless of OEM source (7zap / RockAuto / name_fallback / Cache).
+            # regardless of OEM source (7zap / name_fallback / Cache).
             # The riskiest paths are the non-7zap ones where name-based search is noisier.
             _best = _r.get("best_option") or {}
             _part = _r.get("part", {}) or {}

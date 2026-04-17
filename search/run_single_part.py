@@ -15,10 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from search.engine import search_single_part, search_all_parts
-from search.ebay_search import get_ebay_token
-from search.rockauto_search import load_cache as load_ra_cache
-from rockauto_api import RockAutoClient
+from search.engine import search_all_parts
 
 logging.basicConfig(level=logging.WARNING, handlers=[logging.StreamHandler(sys.stderr)])
 logger = logging.getLogger("parts-bot.run_single_part")
@@ -45,7 +42,7 @@ async def main():
     vehicle_info = json.loads(args.vehicle_json)
     part = json.loads(args.part_json)
 
-    # Use search_all_parts with a single part for full pipeline (RockAuto + eBay)
+    # Use search_all_parts with a single part for full pipeline (7zap + eBay)
     results = await search_all_parts([part], vehicle_info)
     result = results[0] if results else {"part": part, "best_option": None, "landed_cost": None, "error": "no results"}
 
