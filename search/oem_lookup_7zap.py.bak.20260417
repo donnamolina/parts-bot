@@ -184,8 +184,6 @@ _HARDWARE_WORDS: frozenset[str] = frozenset({
     "crossmember",  # structural crossmember — not a front-end assembly
     "draincock",    # radiator draincock
     "spat",         # FCA "SPAT, REAR" = exterior ornamentation trim, not a bumper panel
-    "kit",          # decal kit, hardware kit — not a main assembly
-    "nameplate",    # nameplate / emblem — not a panel or cover
 })
 
 # Query keywords that mark an assembly/main-component query → apply blocklist
@@ -204,10 +202,6 @@ _HARDWARE_QUERY_KW: frozenset[str] = frozenset({
     "sensor", "switch", "harness", "wire", "bolt",
     "molding",    # "door molding", "body molding" queries should not be blocked
     "flare",      # "fender flare" query should not block moldings
-    "slider",     # "headlight slider" is a sub-component, not a full headlamp
-    "adjuster",   # "headlight adjuster" is a sub-component, not a full headlamp
-    "guide",      # "bumper guide" is a sub-component, not a full bumper cover
-    "lip",        # "bumper lip" is a sub-component, not a full bumper cover
 })
 
 
@@ -284,11 +278,6 @@ PART_TO_7ZAP_CATEGORY: dict[str, list[tuple[str, str]]] = {
     "rear valance":             [("body", "bumper")],
     "valance":                  [("body", "bumper")],
     "spoiler":                  [("body", "bumper")],
-
-    # ── Running boards / step bars — accessory, often not in 7zap catalog ─────
-    "running board":             [("body", "panel"), ("accessories", "accessories")],
-    "step bar":                  [("body", "panel"), ("accessories", "accessories")],
-    "side step":                 [("body", "panel"), ("accessories", "accessories")],
 
     # ── Fender: Porsche=bumper section, Hyundai=panel section ────────────────
     "fender panel":             [("body", "bumper"), ("body", "panel")],
@@ -443,32 +432,6 @@ PART_TO_7ZAP_CATEGORY: dict[str, list[tuple[str, str]]] = {
     # ── Electrical/Electronic → "Visibility" (wipers) ────────────────────────
     "wiper blade":              [("electrical", "visib")],
     "wiper motor":              [("electrical", "visib")],
-
-    # ── New: grille / lip / fog / lens / duct / mount ────────────────────────
-    "front lower bumper grille": [("body", "bumper")],
-    "rear lower bumper grille":  [("body", "bumper")],
-    "lower bumper grille":       [("body", "bumper")],
-    "lower grille":              [("body", "bumper"), ("body", "panel")],
-    "front bumper lip":          [("body", "bumper")],
-    "rear bumper lip":           [("body", "bumper")],
-    "bumper lip":                [("body", "bumper")],
-    "bumper guide bracket":      [("body", "bumper")],
-    "front fog light":           [("body", "lighting"), ("electrical", "lighting")],
-    "upper fog light":           [("body", "lighting"), ("electrical", "lighting")],
-    "lower fog light":           [("body", "lighting"), ("electrical", "lighting")],
-    "halogen headlight":         [("body", "lighting"), ("electrical", "lighting")],
-    "headlight lens cover":      [("body", "lighting")],
-    "headlight lens":            [("body", "lighting")],
-    "headlight bezel":           [("body", "lighting")],
-    "headlight adjuster":        [("body", "lighting")],
-    "headlight mounting bracket": [("body", "lighting")],
-    "intercooler hose":          [("engine", "cool"), ("engine", "intake")],
-    "center bumper support":     [("body", "bumper")],
-    "electronic engine mount":   [("engine", "engine")],
-    "running board":             [("body", "bumper"), ("body", "panel")],
-    "rear bumper reflector":     [("body", "lighting"), ("body", "bumper")],
-    "front bumper reflector":    [("body", "lighting"), ("body", "bumper")],
-    "bumper reflector":          [("body", "lighting"), ("body", "bumper")],
 }
 
 # Sorted by key length descending for longest-match-first lookup
@@ -928,20 +891,13 @@ async def lookup_oem_by_vin(
                            ("headlamp", "headlight"))
                 ]
             else:
-                # Keep candidates whose name suggests a rear light.
-                # Explicitly exclude side turn signals / side markers — they live in
-                # the same lighting node but are NOT tail lights.
-                _TAIL_INCLUDE = ("tail light", "tail lamp", "rear light", "stop light",
-                                 "brake light", "reversing light", "reverse light",
-                                 "rear lamp", "reflector", "combination lamp rear",
-                                 "rear combination")
-                _TAIL_EXCLUDE = ("turn signal", "side turn", "side marker",
-                                 "side lamp", "marker lamp", "front turn",
-                                 "side light", "side repeater")
+                # Keep candidates whose name suggests a rear light
                 _filtered = [
                     c for c in candidates
-                    if (any(kw in _candidate_name_lower(c) for kw in _TAIL_INCLUDE)
-                        and not any(kw in _candidate_name_lower(c) for kw in _TAIL_EXCLUDE))
+                    if any(kw in _candidate_name_lower(c) for kw in
+                           ("tail light", "tail lamp", "rear light", "stop light",
+                            "brake light", "reversing light", "reverse light",
+                            "rear lamp", "reflector"))
                 ]
 
             # Only apply filter if it leaves at least one candidate
@@ -1015,62 +971,6 @@ async def lookup_oem_by_vin(
                 )
                 if not (cand_norm_words & _hw_query_words):
                     c["score"] = max(0.0, c["score"] - 50)
-
-        # ── Bumper assembly query: penalise sub-components (covers, caps, upper trims) ──
-        # When the query is for a full bumper assembly (no "cover" in the query),
-        # down-score candidates whose name is clearly a sub-component:
-        # "COVER, REAR BUMPER" / "CAP, BUMPER" / "PLATE, REAR BUMPER" etc.
-        # The full assembly is typically named "BUMPER ASSY" or "BUMPER, REAR".
-        _ql_lower = part_name_english.lower()
-        _bumper_assembly_query = (
-            "bumper" in _ql_lower
-            and "cover" not in _ql_lower
-            and "fascia" not in _ql_lower
-            and "cap" not in _ql_lower
-        )
-        if _bumper_assembly_query:
-            _SUB_KW = ("cover", "cap", "upr", "lower", "upper", "plate",
-                       "trim", "extension", "end", "insert", "deflector",
-                       "absorber step", "step pad")
-            _ASSY_KW = ("assy", "assembly", "bumper, rear", "bumper, front",
-                        "rear bumper", "front bumper")
-            for c in candidates:
-                cname = (c.get("part_name") or "").lower()
-                cnorm = _normalize(cname).lower()
-                _is_sub = any(kw in cname for kw in _SUB_KW)
-                # "COVER, REAR BUMPER" contains "rear bumper" but IS a sub-component.
-                # Only consider it an assembly if "bumper" is the primary noun —
-                # i.e. first word of the name (before any comma) is "bumper".
-                _first_word = cnorm.split(",")[0].strip().split()
-                _first_word = _first_word[0] if _first_word else ""
-                _is_assy = (
-                    _first_word == "bumper"
-                    or "bumper assy" in cnorm
-                    or "bumper assembly" in cnorm
-                )
-                if _is_sub and not _is_assy:
-                    c["score"] = max(0.0, c["score"] - 40)
-                    logger.debug(
-                        f"7zap bumper sub-component penalty: '{c['part_name']}' score→{c['score']:.0f}"
-                    )
-
-        # ── Running board / step bar: reject candidates without step-related keywords ──
-        # 7zap catalogs running boards as accessories; if only structural parts were found,
-        # return no result so the pipeline falls back to name-based eBay search.
-        _step_query_kw = ("running board", "step bar", "side step", "nerf bar")
-        if any(kw in part_name_english.lower() for kw in _step_query_kw):
-            _STEP_NAME_KW = ("board", "step", "bar", "nerf", "sill", "tube", "running")
-            _step_cands = [
-                c for c in candidates
-                if any(kw in (c.get("part_name") or "").lower() for kw in _STEP_NAME_KW)
-            ]
-            if _step_cands:
-                candidates = _step_cands
-            else:
-                cache.store_negative(part_key)
-                return OemLookupResult(
-                    error=f"7zap: no running board/step parts found for this VIN (catalog may not include accessories)"
-                )
 
         # ── Side filter ──
         if req_side:

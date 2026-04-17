@@ -49,23 +49,29 @@ def _style_data(cell, bg=WHITE, bold=False, align="left"):
 
 def _confidence_label(result: dict, is_flagged: bool) -> str:
     """Compute confidence label for a single result row."""
-    if is_flagged:
-        return "🔴 Revisar"
     if result.get("from_cache"):
         return "✅ Verificado"
+    # Sonnet rejected this specific listing as wrong part — always red regardless of OEM source
+    _sv = result.get("sonnet_verify") or {}
+    if _sv.get("verdict") == "WRONG_PART":
+        return "🔴 Revisar"
     best = result.get("best_option") or {}
+    pn = best.get("part_number") or ""
+    import re as _re
+    is_real_oem = bool(pn and _re.search(r'\d', pn) and 5 <= len(pn) <= 18 and not pn.isalpha())
+    # 7zap source takes priority — OEM# from VIN catalog is authoritative
+    # regardless of Sonnet price flags or missing eBay price
+    oem_source = result.get("oem_source", "")
+    if oem_source.startswith("7zap"):
+        return "🟢 7zap VIN" if is_real_oem else "🟡 7zap verificar"
+    # Sonnet flagged this result as suspicious
+    if is_flagged:
+        return "🔴 Revisar"
     if not best.get("price"):
         return "🔴 Revisar"
     # Cross-platform OEM# — number came from a different car's catalog
     if result.get("oem_platform_mismatch"):
         return "🔴 Verificar plataforma"
-    pn = best.get("part_number") or ""
-    import re as _re
-    is_real_oem = bool(pn and _re.search(r'\d', pn) and 5 <= len(pn) <= 18 and not pn.isalpha())
-    # 7zap VIN-exact lookup — show source-specific label
-    oem_source = result.get("oem_source", "")
-    if oem_source.startswith("7zap"):
-        return "🟢 7zap VIN" if is_real_oem else "🟡 7zap verificar"
     # Generic labels for RockAuto-sourced OEM# or name-only searches
     if is_real_oem:
         return "🟢 Alto"
@@ -295,9 +301,9 @@ def generate_excel(results: list, vehicle_info: dict, output_path: str,
         "#", "Pieza (Original)", "Pieza (EN)", "Cant.", "Lado", "OEM #",
         "Precio (USD)", "Envio US (USD)",
         "Peso (lbs)", "Courier (RD$)", "Costo Total (RD$)",
-        "Entrega (días)", "Confianza", "Fuente", "Link",
+        "Entrega (días)", "Confianza", "Fuente", "Link", "Nota",
     ]
-    col_widths = [4, 22, 20, 6, 8, 16, 13, 13, 10, 13, 16, 12, 14, 10, 40]
+    col_widths = [4, 22, 20, 6, 8, 16, 13, 13, 10, 13, 16, 12, 14, 10, 40, 30]
 
     for col, (header, width) in enumerate(zip(headers, col_widths), 1):
         cell = ws.cell(row=3, column=col, value=header)
@@ -442,6 +448,24 @@ def generate_excel(results: list, vehicle_info: dict, output_path: str,
         else:
             ws.cell(row=row, column=15, value="N/F")
             _style_data(ws.cell(row=row, column=15), bg=bg, align="center")
+
+        # Nota (col 16) — Sonnet per-listing verification result
+        sv = result.get("sonnet_verify") or {}
+        verdict = sv.get("verdict", "")
+        note_text = sv.get("note", "")
+        if verdict == "WRONG_PART":
+            nota_val = f"⚠️ Pieza incorrecta: {note_text}" if note_text else "⚠️ Pieza incorrecta"
+            nota_bg = ORANGE_BG
+        elif verdict == "SUSPICIOUS_PRICE":
+            nota_val = f"💲 Precio sospechoso: {note_text}" if note_text else "💲 Precio sospechoso"
+            nota_bg = YELLOW_BG
+        else:
+            nota_val = ""
+            nota_bg = bg
+        nota_cell = ws.cell(row=row, column=16, value=nota_val)
+        _style_data(nota_cell, bg=nota_bg)
+        if nota_val:
+            nota_cell.font = Font(name="Calibri", size=9, italic=True)
 
         ws.row_dimensions[row].height = 20
 

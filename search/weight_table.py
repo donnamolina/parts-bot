@@ -6,6 +6,8 @@ Conservative estimates — round up when uncertain.
 
 PART_WEIGHT_ESTIMATES = {
     # Body panels
+    "hood hinge": 4,     # per hinge (small bracket, ~1.5 lbs each + packaging)
+    "hood latch": 2,
     "hood": 35,
     "fender": 15,
     "bumper cover": 12,

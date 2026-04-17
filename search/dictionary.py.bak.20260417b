@@ -31,19 +31,9 @@ DR_TO_ENGLISH = {
     "guardafango": "fender panel",
     "guardalodo": "fender panel",
     "guardabarro": "fender panel",
-    "bumper": "bumper",
-    "bumper delantero": "front bumper",
-    "bumper trasero": "rear bumper",
-    "forro de bumper delantero": "front bumper cover",
-    "forro de bumper trasero": "rear bumper cover",
-    "forro de bumper": "bumper cover",
-    "forro bumper": "bumper cover",
-    "facia de bumper delantero": "front bumper cover",
-    "facia de bumper trasero": "rear bumper cover",
-    "facia de bumper": "bumper cover",
-    "fascia de bumper delantero": "front bumper cover",
-    "fascia de bumper trasero": "rear bumper cover",
-    "fascia de bumper": "bumper cover",
+    "bumper": "bumper cover",
+    "bumper delantero": "front bumper cover",
+    "bumper trasero": "rear bumper cover",
     "bumper trasero inferior": "rear bumper lower panel",
     "bumper inferior": "lower bumper panel",
     "reflector bumper trasero": "rear bumper reflector",
@@ -125,9 +115,6 @@ DR_TO_ENGLISH = {
 
     "tina": "fender liner",
     "lodero": "mud flap",
-    "chapaleta": "mud flap",
-    "chapaleta trasera": "rear mud flap",
-    "chapaleta delantera": "front mud flap",
     "puerta": "door assembly",
     "moldura de puerta": "door molding",
     "platina": "chrome trim",
@@ -382,24 +369,11 @@ def translate_part(name_original: str) -> dict:
 
     cleaned, side, position = extract_side_position(stripped)
 
-    # Build a side-only-stripped version (position words kept) for compound lookups.
-    # This lets "farol trasero" match before it degrades to just "farol".
-    side_stripped = stripped
-    for _indicator, _ in SIDE_INDICATORS:
-        side_stripped = _re.sub(r"\b" + _re.escape(_indicator) + r"\b",
-                                "", side_stripped, flags=_re.IGNORECASE)
-    side_stripped = " ".join(side_stripped.lower().split())
-
-    # Lookup priority: exact(side-stripped) > exact(cleaned) > partial(side-stripped) > partial(cleaned)
-    english = DR_TO_ENGLISH.get(side_stripped) or DR_TO_ENGLISH.get(cleaned.lower())
+    # Try exact match first
+    english = DR_TO_ENGLISH.get(cleaned.lower())
 
     if not english:
-        for dr_term, en_term in sorted(DR_TO_ENGLISH.items(), key=lambda x: -len(x[0])):
-            if dr_term in side_stripped:
-                english = en_term
-                break
-
-    if not english:
+        # Try partial matches — longest key first
         for dr_term, en_term in sorted(DR_TO_ENGLISH.items(), key=lambda x: -len(x[0])):
             if dr_term in cleaned.lower():
                 english = en_term

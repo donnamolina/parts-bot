@@ -24,3 +24,7 @@ logs/
 .health_fails
 *.sqlite
 *.db
+
+# WhatsApp QR / session state
+sessions.json
+qr.png

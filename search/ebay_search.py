@@ -227,6 +227,9 @@ BODY_PANEL_MIN_PRICES: dict[str, float] = {
     "headlamp assembly": 30.0,
     "tail light": 20.0,
     "tail lamp assembly": 20.0,
+    "running board": 40.0,
+    "step bar": 40.0,
+    "side step": 40.0,
     "fog light": 15.0,
     "side mirror": 20.0,
     "outside mirror": 20.0,
@@ -249,6 +252,9 @@ BODY_PART_TITLE_EXCLUDES = {
     "air dam", "skid plate", "deflector", "trim piece", "filler panel",
     "tow cover", "license bracket", "license plate bracket",
     "chrome", "chrome trim", "chrome cover",
+    # Running board / step-bar specific exclusions
+    "hitch step", "hitch-step", "hitch mount step", "receiver step",
+    "bed step", "bumper step", "tire step", "tailgate step",
 }
 
 BODY_PANEL_KEYWORDS = set(BODY_PANEL_MIN_PRICES.keys())
@@ -371,6 +377,18 @@ async def search_ebay(
             if any(excl in title_lower for excl in BODY_PART_TITLE_EXCLUDES):
                 logger.debug(f"eBay: skipping accessory listing '{title[:60]}'")
                 continue
+
+            # Running board / side step searches: require the title to contain
+            # at least one descriptive keyword. Filters out bumper step pads
+            # (e.g. DZ6210S) whose titles are just part numbers with no keywords.
+            _STEP_QUERY_KW = ("running board", "step bar", "side step", "nerf bar")
+            _STEP_TITLE_REQUIRE = ("running board", "side step", "step bar", "nerf bar",
+                                   "board", "tube step", "oval step", "side bar")
+            _part_en_lower = (part_english or "").lower()
+            if any(kw in _part_en_lower for kw in _STEP_QUERY_KW):
+                if not any(kw in title_lower for kw in _STEP_TITLE_REQUIRE):
+                    logger.debug(f"eBay: skipping step listing with no board/step keyword '{title[:60]}'")
+                    continue
 
         condition = item.get("condition", "Unknown")
         if isinstance(condition, dict):

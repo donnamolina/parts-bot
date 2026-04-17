@@ -31,27 +31,15 @@ DR_TO_ENGLISH = {
     "guardafango": "fender panel",
     "guardalodo": "fender panel",
     "guardabarro": "fender panel",
-    "bumper": "bumper",
-    "bumper delantero": "front bumper",
-    "bumper trasero": "rear bumper",
-    "forro de bumper delantero": "front bumper cover",
-    "forro de bumper trasero": "rear bumper cover",
-    "forro de bumper": "bumper cover",
-    "forro bumper": "bumper cover",
-    "facia de bumper delantero": "front bumper cover",
-    "facia de bumper trasero": "rear bumper cover",
-    "facia de bumper": "bumper cover",
-    "fascia de bumper delantero": "front bumper cover",
-    "fascia de bumper trasero": "rear bumper cover",
-    "fascia de bumper": "bumper cover",
+    "bumper": "bumper cover",
+    "bumper delantero": "front bumper cover",
+    "bumper trasero": "rear bumper cover",
     "bumper trasero inferior": "rear bumper lower panel",
     "bumper inferior": "lower bumper panel",
     "reflector bumper trasero": "rear bumper reflector",
     "reflector bumper delantero": "front bumper reflector",
     "reflector bumper": "bumper reflector",
     "reflector de bumper": "bumper reflector",
-    "guias de bumper": "bumper guide bracket",
-    "guías de bumper": "bumper guide bracket",
     "guia de bumper": "bumper guide bracket",
     "guía de bumper": "bumper guide bracket",
     "guia bumper": "bumper guide bracket",
@@ -71,63 +59,8 @@ DR_TO_ENGLISH = {
     "flear guardafango": "fender flare",
     "flear guardabarro": "fender flare",
     "flear": "fender flare",
-
-    # Grille variants (lower grille, not bumper cover)
-    "parilla inferior bumper delantero": "front lower bumper grille",
-    "parilla inferior bumper trasero": "rear lower bumper grille",
-    "parilla inferior bumper": "lower bumper grille",
-    "parilla inferior": "lower grille",
-    "parrilla inferior bumper delantero": "front lower bumper grille",
-    "parrilla inferior bumper": "lower bumper grille",
-    "parrilla inferior": "lower grille",
-
-    # Bumper lip (not bumper cover)
-    "lip bumper delantero": "front bumper lip",
-    "lip bumper trasero": "rear bumper lip",
-    "lip de bumper delantero": "front bumper lip",
-    "lip de bumper trasero": "rear bumper lip",
-    "lip de bumper": "bumper lip",
-    "lip bumper": "bumper lip",
-
-    # Fog light / halogen (not bumper cover)
-    "halogeno bumper delantero": "front fog light",
-    "halógeno bumper delantero": "front fog light",
-    "halogeno bumper": "fog light",
-    "halógeno bumper": "fog light",
-    "halogeno superior e inferior": "upper and lower fog light",
-    "halogeno superior": "upper fog light",
-    "halogeno inferior": "lower fog light",
-    "halogeno delantero": "halogen headlight",
-    "halógeno delantero": "halogen headlight",
-    "halogeno": "halogen headlight",
-    "halógeno": "halogen headlight",
-
-    # Headlight lens cover / bezel (not full headlight)
-    "cover pantalla": "headlight lens cover",
-    "cover de pantalla": "headlight lens cover",
-    "mica de pantalla": "headlight lens",
-    "mica pantalla": "headlight lens",
-    "bezel pantalla": "headlight bezel",
-
-    # Intercooler duct (not the intercooler itself)
-    "ducto del intercooler": "intercooler hose",
-    "ducto de intercooler": "intercooler hose",
-    "ducto intercooler": "intercooler hose",
-
-    # Front-end subcomponents
-    "frentil central": "center bumper support",
-    "frentil central delantero": "front center bumper support",
-
-    # Engine mount variants
-    "soporte electronico de motor": "electronic engine mount",
-    "soporte electrónico de motor": "electronic engine mount",
-    "soporte electronico del motor": "electronic engine mount",
-
     "tina": "fender liner",
     "lodero": "mud flap",
-    "chapaleta": "mud flap",
-    "chapaleta trasera": "rear mud flap",
-    "chapaleta delantera": "front mud flap",
     "puerta": "door assembly",
     "moldura de puerta": "door molding",
     "platina": "chrome trim",
@@ -326,9 +259,7 @@ SIDE_INDICATORS = [
 POSITION_INDICATORS = [
     ("delantero", "front"), ("delantera", "front"), ("trasero", "rear"), ("trasera", "rear"),
     ("front", "front"), ("rear", "rear"),
-    ("tras", "rear"),
-    # NOTE: "del" removed — it means "of the" in Spanish, not "front".
-    # "delantero"/"delantera" already catch front position.
+    ("tras", "rear"), ("del", "front"),
 ]
 
 
@@ -382,24 +313,11 @@ def translate_part(name_original: str) -> dict:
 
     cleaned, side, position = extract_side_position(stripped)
 
-    # Build a side-only-stripped version (position words kept) for compound lookups.
-    # This lets "farol trasero" match before it degrades to just "farol".
-    side_stripped = stripped
-    for _indicator, _ in SIDE_INDICATORS:
-        side_stripped = _re.sub(r"\b" + _re.escape(_indicator) + r"\b",
-                                "", side_stripped, flags=_re.IGNORECASE)
-    side_stripped = " ".join(side_stripped.lower().split())
-
-    # Lookup priority: exact(side-stripped) > exact(cleaned) > partial(side-stripped) > partial(cleaned)
-    english = DR_TO_ENGLISH.get(side_stripped) or DR_TO_ENGLISH.get(cleaned.lower())
+    # Try exact match first
+    english = DR_TO_ENGLISH.get(cleaned.lower())
 
     if not english:
-        for dr_term, en_term in sorted(DR_TO_ENGLISH.items(), key=lambda x: -len(x[0])):
-            if dr_term in side_stripped:
-                english = en_term
-                break
-
-    if not english:
+        # Try partial matches — longest key first
         for dr_term, en_term in sorted(DR_TO_ENGLISH.items(), key=lambda x: -len(x[0])):
             if dr_term in cleaned.lower():
                 english = en_term
@@ -712,25 +630,4 @@ PART_TO_CATEGORY = {
     "tina": ("body & lamp assembly", ["inner fender"]),
     "puerta": ("body & lamp assembly", ["door"]),
     "moldura de puerta": ("body & lamp assembly", ["door molding"]),
-
-    # ─── New: grille / lip / fog / lens / duct / mount categories ────
-    "front lower bumper grille": ("body & lamp assembly", ["grille", "lower"]),
-    "rear lower bumper grille": ("body & lamp assembly", ["grille", "lower"]),
-    "lower bumper grille": ("body & lamp assembly", ["grille", "lower"]),
-    "lower grille": ("body & lamp assembly", ["grille", "lower"]),
-    "front bumper lip": ("body & lamp assembly", ["bumper cover", "valance panel"]),
-    "rear bumper lip": ("body & lamp assembly", ["bumper cover", "valance panel"]),
-    "bumper lip": ("body & lamp assembly", ["bumper cover", "valance panel"]),
-    "halogen headlight": ("body & lamp assembly", ["headlamp assembly"]),
-    "front fog light": ("body & lamp assembly", ["fog / driving lamp assembly"]),
-    "upper fog light": ("body & lamp assembly", ["fog / driving lamp assembly"]),
-    "lower fog light": ("body & lamp assembly", ["fog / driving lamp assembly"]),
-    "upper and lower fog light": ("body & lamp assembly", ["fog / driving lamp assembly"]),
-    "headlight lens cover": ("body & lamp assembly", ["headlamp assembly"]),
-    "headlight lens": ("body & lamp assembly", ["headlamp assembly"]),
-    "headlight bezel": ("body & lamp assembly", ["headlamp assembly"]),
-    "intercooler hose": ("cooling system", ["intercooler", "charge air", "turbo hose"]),
-    "center bumper support": ("body & lamp assembly", ["bumper reinforcement", "bumper support"]),
-    "front center bumper support": ("body & lamp assembly", ["bumper reinforcement", "bumper support"]),
-    "electronic engine mount": ("engine", ["engine mount"]),
 }

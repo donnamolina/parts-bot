@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from search.engine import search_all_parts
 from search.excel_builder import generate_excel
+from search.verify_listing import verify_ebay_listing
 from search.dictionary import translate_part
 from search.vin_decode import decode_vin
 from search.db_client import (
@@ -177,12 +178,14 @@ async def main():
             "quantity": p.get("quantity", 1) or 1,
         }
 
-        # Ensure English translation exists
+        # Always run translate_part so side/position are extracted from DR Spanish name.
+        # OCR sets name_english but often leaves side=null — translate_part's
+        # extract_side_position is the reliable source for izquierdo/derecho.
+        translated = translate_part(part["name_original"])
         if not part["name_english"] or part["name_english"] == part["name_original"]:
-            translated = translate_part(part["name_original"])
             part["name_english"] = translated["name_english"]
-            part["side"] = part["side"] or translated["side"]
-            part["position"] = part["position"] or translated["position"]
+        part["side"] = part["side"] or translated["side"]
+        part["position"] = part["position"] or translated["position"]
 
         dedup_key = (
             part["name_english"].lower().strip(),
@@ -261,6 +264,128 @@ async def main():
         else:
             results.append(next(fresh_iter))
 
+    # ── Per-listing Sonnet verification (concurrent) ──────────────────────────
+    # For every part where 7zap found an OEM# AND eBay returned a listing,
+    # verify the listing title actually matches the requested part.
+    # All calls run concurrently — adds ~2s total, not 20s.
+    _verify_enabled = os.getenv("VERIFY_WITH_SONNET", "true").lower() == "true"
+    _api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if _verify_enabled and _api_key:
+        _to_verify = []
+        for _r in results:
+            _oem_src = _r.get("oem_source", "") or ""
+            _best = _r.get("best_option") or {}
+            _part = _r.get("part", {}) or {}
+            if _oem_src.startswith("7zap") and _best.get("price") and _best.get("title"):
+                _to_verify.append((_r, _part, _best))
+
+        if _to_verify:
+            logger.info(f"Running Sonnet listing verification for {len(_to_verify)} parts...")
+            _verify_coros = [
+                verify_ebay_listing(
+                    part_name_english=_p.get("name_english", ""),
+                    year=vehicle_info.get("year", 0),
+                    make=vehicle_info.get("make", ""),
+                    model=vehicle_info.get("model", ""),
+                    oem_number=_b.get("part_number", ""),
+                    listing_title=_b.get("title", ""),
+                    price=_b.get("price", 0),
+                    api_key=_api_key,
+                )
+                for _r, _p, _b in _to_verify
+            ]
+            _verdicts = await asyncio.gather(*_verify_coros, return_exceptions=True)
+            for (_r, _p, _b), _verdict in zip(_to_verify, _verdicts):
+                if isinstance(_verdict, Exception):
+                    logger.warning(f"Verification error for '{_p.get('name_english')}': {_verdict}")
+                    continue
+                _r["sonnet_verify"] = _verdict
+                if _verdict["verdict"] != "MATCH":
+                    logger.info(
+                        f"Listing verify: '{_p.get('name_english')}' → "
+                        f"{_verdict['verdict']}: {_verdict['note']}"
+                    )
+
+        # ── WRONG_PART retry: discard bad OEM#, retry with name-based eBay search ──
+        _wrong_parts = [
+            (_r, _p, _b) for (_r, _p, _b) in _to_verify
+            if (_r.get("sonnet_verify") or {}).get("verdict") == "WRONG_PART"
+        ]
+        if _wrong_parts:
+            logger.info(f"WRONG_PART retry: {len(_wrong_parts)} part(s) to retry with name search")
+            from search.ebay_search import search_ebay, get_ebay_token
+            from search.cost_calculator import calculate_landed_cost
+            _ebay_token = await get_ebay_token()
+
+            _retry_coros = []
+            _retry_refs = []
+            for _r, _p, _b in _wrong_parts:
+                _part_en = _p.get("name_english", "")
+                _side = _p.get("side")
+                # Use more specific search terms for certain part types to avoid
+                # unrelated products (e.g. "running board" can return hitch steps)
+                _STEP_SYNONYMS = {
+                    "running board": "running board side step",
+                    "step bar": "running board side step bar",
+                }
+                _search_term = _STEP_SYNONYMS.get(_part_en.lower(), _part_en)
+                _nm_q = (
+                    f"{vehicle_info.get('year')} {vehicle_info.get('make')} "
+                    f"{vehicle_info.get('model')} {_search_term} {_side or ''}"
+                ).strip()
+                _retry_coros.append(search_ebay(
+                    query=_nm_q,
+                    side=_side,
+                    _token=_ebay_token,
+                    part_english=_part_en,
+                ))
+                _retry_refs.append((_r, _p))
+
+            _retry_ebay = await asyncio.gather(*_retry_coros, return_exceptions=True)
+
+            _reverify_coros = []
+            _reverify_refs = []
+            for (_r, _p), _ebay_res in zip(_retry_refs, _retry_ebay):
+                if isinstance(_ebay_res, Exception) or not _ebay_res:
+                    logger.warning(f"WRONG_PART retry: no eBay results for '{_p.get('name_english')}'")
+                    continue
+                _listing = _ebay_res[0]
+                _reverify_coros.append(verify_ebay_listing(
+                    part_name_english=_p.get("name_english", ""),
+                    year=vehicle_info.get("year", 0),
+                    make=vehicle_info.get("make", ""),
+                    model=vehicle_info.get("model", ""),
+                    oem_number="",
+                    listing_title=_listing.get("title", ""),
+                    price=_listing.get("price", 0),
+                    api_key=_api_key,
+                ))
+                _reverify_refs.append((_r, _p, _listing))
+
+            if _reverify_coros:
+                _reverify_v = await asyncio.gather(*_reverify_coros, return_exceptions=True)
+                for (_r, _p, _listing), _v in zip(_reverify_refs, _reverify_v):
+                    if isinstance(_v, Exception):
+                        continue
+                    _part_en = _p.get("name_english", "")
+                    # Replace result with name-based listing, clear bad OEM#
+                    _listing["part_number"] = ""
+                    _r["ebay"] = _listing
+                    _r["best_option"] = _listing
+                    _r["oem_source"] = "name_fallback"
+                    _r["oem_confidence"] = "yellow"
+                    _r["sonnet_verify"] = _v
+                    if _listing.get("price"):
+                        _r["landed_cost"] = calculate_landed_cost(
+                            listing_price_usd=_listing["price"],
+                            us_shipping_usd=_listing.get("shipping", 0),
+                            part_name_english=_part_en,
+                        )
+                    logger.info(
+                        f"WRONG_PART retry '{_part_en}': verdict={_v.get('verdict')} "
+                        f"listing='{_listing.get('title','')[:60]}'"
+                    )
+
     # Sonnet end-of-batch verification pass
     sonnet_flags = await sonnet_verify_results(vehicle_info, results)
     if sonnet_flags:
@@ -277,7 +402,12 @@ async def main():
             flagged_indices.add(int(m.group(1)) - 1)  # 0-based
 
     for i, r in enumerate(results):
-        if not r.get("from_cache") and r.get("best_option") and i not in flagged_indices:
+        _sv_verdict = (r.get("sonnet_verify") or {}).get("verdict", "")
+        _skip_cache = (r.get("from_cache")
+                       or not r.get("best_option")
+                       or i in flagged_indices
+                       or _sv_verdict == "WRONG_PART")
+        if not _skip_cache:
             part = r.get("part", {})
             upsert_cached_result_safe(
                 make, model, year,

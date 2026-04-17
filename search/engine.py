@@ -104,9 +104,14 @@ async def search_single_part(
     side = part.get("side")
     position = part.get("position")
 
-    # Build position-aware query
+    # Build position-aware query — skip prepending position if it's already
+    # the first word of the translation (e.g. "rear bumper" with pos="rear"
+    # would produce "rear rear bumper" without this check).
+    _pos_already_in_name = bool(
+        position and part_english.lower().startswith(position.lower())
+    )
     query_parts = []
-    if position:
+    if position and not _pos_already_in_name:
         query_parts.append(position)
     query_parts.append(part_english)
     full_query = " ".join(query_parts)
@@ -138,8 +143,14 @@ async def search_single_part(
             try:
                 from .oem_lookup_7zap import lookup_oem_by_vin, SevenZapAuthError
                 # Prepend side + position so 7zap sets req_side and direction correctly, and caches per-side/pos
-                _side_pos = " ".join(filter(None, [side, position]))
-                _zap_query = f"{_side_pos} {part_english}" if _side_pos else part_english
+                # Skip position prefix if part_english already starts with it (avoids "rear rear bumper").
+                _zap_parts = []
+                if side:
+                    _zap_parts.append(side)
+                if position and not part_english.lower().startswith(position.lower()):
+                    _zap_parts.append(position)
+                _side_pos = " ".join(_zap_parts)
+                _zap_query = f"{_side_pos} {part_english}".strip() if _side_pos else part_english
                 _zap = await lookup_oem_by_vin(vin, _zap_query, make_hint=vehicle_info.get("make"))
                 if _zap.oem_number:
                     oem_number = _zap.oem_number
@@ -273,6 +284,7 @@ def _pick_best_option(rockauto: dict | None, ebay: dict | None, part: dict) -> d
         "condition": ebay.get("condition", "Unknown"),
         "source": "eBay",
         "url": ebay.get("url", ""),
+        "title": ebay.get("title", ""),   # preserved for Sonnet listing verification
         "tier": "",
         "availability": "In Stock",
         "delivery_days_min": ebay.get("delivery_days_min"),
