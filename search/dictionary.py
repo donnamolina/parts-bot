@@ -136,10 +136,9 @@ DR_TO_ENGLISH = {
     "tolva": "truck bed",
     "techo": "roof panel",
 
-    # Glass
+    # Glass (see also Bug 10 manual-review entries near airbags section)
     "cristal": "windshield",
     "parabrisas": "windshield",
-    "cristal trasero": "rear windshield",
     "medallon": "rear window",
     "medallón": "rear window",
 
@@ -147,9 +146,14 @@ DR_TO_ENGLISH = {
     "farol trasero": "tail light",
     "farol delantero": "headlight",
     "farol": "headlight",
-    "pantalla trasera": "tail light",
+    # Bug 9: pantalla context-awareness — explicit positional forms map; bare "pantalla"
+    # is intentionally NOT mapped so Bug 6 correction handler can ask for clarification.
     "pantalla delantera": "headlight",  # pantalla = headlight in DR; bumper cover uses "bumper delantero"
-    "pantalla": "headlight",
+    "pantalla trasera": "tail light",
+    "pantalla del": "headlight",
+    "pantalla tras": "tail light",
+    "pantalla lh del": "headlight",
+    "pantalla rh del": "headlight",
     "stop": "tail light",
     "violeta": "tail light",
     "cocuyo": "side marker",
@@ -243,6 +247,13 @@ DR_TO_ENGLISH = {
     "condensador": "ac condenser",
     "compresor de aire": "ac compressor",
     "termostato": "thermostat",
+    # A/C hoses (Bug 7) — placed BEFORE generic "manguera" for longest-match
+    "manguera alta de a/c": "a/c discharge hose",
+    "manguera baja de a/c": "a/c suction hose",
+    "manguera a/c alta": "a/c discharge hose",
+    "manguera a/c baja": "a/c suction hose",
+    "manguera alta ac": "a/c discharge hose",
+    "manguera baja ac": "a/c suction hose",
     "mangera": "radiator hose",
     "manguera": "radiator hose",
     "manguera de radiador": "radiator hose",
@@ -271,7 +282,9 @@ DR_TO_ENGLISH = {
     "choque": "shock absorber",
     "breik": "brake pad",
 
-    # Airbags / Safety
+    # Airbags / Safety (Bug 10: manual-review keywords)
+    "bolsa de aire de rodilleras":  "knee airbag",
+    "bolsa de aire cortina":        "curtain airbag",
     "bolsa de aire techo":          "curtain airbag",
     "bolsa de aire rodilla":        "knee airbag",
     "bolsa de aire guia":           "side curtain airbag",
@@ -281,6 +294,12 @@ DR_TO_ENGLISH = {
     "bolsa de aire asiento":        "seat airbag",
     "bolsa de aire volante":        "driver airbag",
     "bolsa de aire":                "airbag",
+    "modulo de bolsa de aire":      "airbag module",
+    "módulo de bolsa de aire":      "airbag module",
+    "modulo srs":                   "srs module",
+    "módulo srs":                   "srs module",
+    "cinturon de seguridad":        "seatbelt",
+    "cinturón de seguridad":        "seatbelt",
     "cinturon trasero":             "rear seatbelt",
     "cinturón trasero":             "rear seatbelt",
     "cinturon delantero":           "front seatbelt",
@@ -288,6 +307,17 @@ DR_TO_ENGLISH = {
     "cinturon":                     "seatbelt",
     "cinturón":                     "seatbelt",
     "pretensor":                    "seatbelt pretensioner",
+    # Glass (Bug 10 manual review keywords)
+    "cristal delantero":            "windshield",
+    "cristal trasero":              "rear glass",
+    # Modules / ECUs (Bug 10 dealer-only / VIN-programmed keywords)
+    # NOTE: bare "modulo" is intentionally NOT mapped — Bug 6 asks for clarification.
+    "computadora de motor":         "ecu",
+    "computadora del motor":        "ecu",
+    "modulo de transmision":        "tcm",
+    "modulo de transmisión":        "tcm",
+    "módulo de transmision":        "tcm",
+    "módulo de transmisión":        "tcm",
 
     # Front-end assembly
     "patas de bonete":              "hood hinges",
@@ -304,6 +334,10 @@ DR_TO_ENGLISH = {
     "deslizador":                   "headlight adjuster",
     "base de bumper":               "bumper reinforcement",
     "base de búmper":               "bumper reinforcement",
+    "base de parachoque":           "bumper reinforcement",
+    "base de parachoques":          "bumper reinforcement",
+    "absorbedor de parachoque":     "bumper energy absorber",
+    "absorbedor de parachoques":    "bumper energy absorber",
     "clips":                        "retaining clips",
     "estribo":                      "running board",
     "estribo plastico":             "running board",

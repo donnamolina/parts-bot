@@ -1037,9 +1037,20 @@ async def lookup_oem_by_vin(
         _ASSY_PREFER_KW: tuple[str, ...] = ("assy", "assembly", "complete", "comp")
 
         _ql_lower = part_name_english.lower()
-        _is_full_assy_query = any(kw == _ql_lower or _ql_lower.endswith(" " + kw) or _ql_lower.startswith(kw + " ")
-                                  for kw in _FULL_ASSEMBLY_QUERIES) or \
-                              any(kw in _ql_lower for kw in _FULL_ASSEMBLY_QUERIES)
+
+        # Bug 8: blocklist exemption — if the user explicitly asked for a structural
+        # sub-component (reinforcement/absorber/rebar/bracket/support/mount/brace/
+        # stay/retainer), don't apply the full-assembly blocklist. Those parts ARE
+        # sub-components and we want 7zap to return them.
+        def _should_apply_assembly_blocklist(query_lower: str) -> bool:
+            _subcomp_explicit = ("reinforcement", "absorber", "rebar", "bracket",
+                                  "support", "mount", "brace", "stay", "retainer")
+            if any(sub in query_lower for sub in _subcomp_explicit):
+                return False
+            return any(kw in query_lower for kw in _FULL_ASSEMBLY_QUERIES)
+
+        _is_full_assy_query = _should_apply_assembly_blocklist(_ql_lower)
+
         # Don't apply if query is explicitly for a sub-component
         if any(kw in _ql_lower for kw in _HARDWARE_QUERY_KW):
             _is_full_assy_query = False

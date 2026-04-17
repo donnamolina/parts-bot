@@ -348,6 +348,49 @@ async function findRecentSession(phoneNumber, vehicleHint) {
 // ─── Correction Helpers ─────────────────────────────────────────────────────
 
 /**
+ * Bug 6: Sonnet-powered correction handler via Python subprocess.
+ * Calls whatsapp/correction_handler.py which returns a structured action envelope.
+ * Used as the fallback when legacy parseCorrection can't interpret the message.
+ * Returns the envelope {action, params, explanation_es} or null on error.
+ */
+async function handleCorrectionPy(text, parts, vehicle, history) {
+  return new Promise((resolve) => {
+    const proc = spawn(PYTHON, [path.join(__dirname, 'whatsapp', 'correction_handler.py')], {
+      cwd: __dirname,
+      env: { ...process.env, PYTHONPATH: __dirname },
+      timeout: 30000,
+    });
+    let stdout = '';
+    let stderr = '';
+    proc.stdout.on('data', d => { stdout += d.toString(); });
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+    proc.on('close', code => {
+      if (code !== 0) {
+        consoleLog('handleCorrectionPy exit', code, stderr.slice(-300));
+        return resolve(null);
+      }
+      try {
+        resolve(JSON.parse(stdout.trim()));
+      } catch (e) {
+        consoleLog('handleCorrectionPy parse error:', e.message, stdout.slice(0, 300));
+        resolve(null);
+      }
+    });
+    proc.on('error', (e) => {
+      consoleLog('handleCorrectionPy spawn error:', e.message);
+      resolve(null);
+    });
+    proc.stdin.write(JSON.stringify({
+      parts: parts || [],
+      vehicle: vehicle || {},
+      history: history || [],
+      message: text || '',
+    }));
+    proc.stdin.end();
+  });
+}
+
+/**
  * Use Sonnet to parse a correction message against the current parts list.
  * Returns { part_index, corrected_name_english, corrected_name_dr, side, position }
  * or null if the message is not a correction.
@@ -1174,6 +1217,101 @@ Return ONLY valid JSON, no other text:
         const parsed = await parseCorrection(textContent, session.extractedData.parts || []);
 
         if (!parsed || (!parsed.is_correction && !parsed.is_vehicle_correction && !parsed.is_done)) {
+          // Bug 6: fallback to Python Sonnet correction_handler which supports
+          // richer actions (ask_clarification, add_part, remove_part, update_quantity, etc.)
+          const env = await handleCorrectionPy(
+            textContent,
+            session.extractedData.parts || [],
+            session.extractedData.vehicle || {},
+            getHistory(jid) || [],
+          );
+          if (env && env.action) {
+            const action = env.action;
+            const params = env.params || {};
+            const explain = env.explanation_es || '';
+
+            if (action === 'confirm_all') {
+              await runSearchPipeline(sock, jid, session.extractedData);
+              return;
+            }
+            if (action === 'ask_clarification') {
+              const q = params.question_es || explain ||
+                (session.lang === 'es'
+                  ? 'No te entendí 😅 ¿Puedes aclarar?'
+                  : "Not sure what you mean 😅 Can you clarify?");
+              await sendText(sock, jid, q);
+              return;
+            }
+            if (action === 'out_of_scope') {
+              await sendText(sock, jid, explain ||
+                (session.lang === 'es'
+                  ? 'No es una corrección. Responde *OK* para buscar o indícame qué ajustar.'
+                  : 'Not a correction. Reply *OK* to search or tell me what to adjust.'));
+              return;
+            }
+            if (action === 'update_quantity') {
+              const idx0 = (params.index || 1) - 1;
+              const p = session.extractedData.parts || [];
+              if (idx0 >= 0 && idx0 < p.length && typeof params.quantity === 'number') {
+                p[idx0].quantity = params.quantity;
+                await sendText(sock, jid, explain || `✅ Actualizado #${idx0 + 1} x${params.quantity}`);
+                return;
+              }
+            }
+            if (action === 'remove_part') {
+              const idx0 = (params.index || 1) - 1;
+              const p = session.extractedData.parts || [];
+              if (idx0 >= 0 && idx0 < p.length) {
+                p.splice(idx0, 1);
+                await sendText(sock, jid, explain || `✅ Pieza #${idx0 + 1} eliminada`);
+                return;
+              }
+            }
+            if (action === 'add_part') {
+              const np = {
+                name_original: params.name_dr || '',
+                name_dr: params.name_dr || '',
+                name_english: '',
+                side: params.side || null,
+                position: params.position || null,
+                quantity: params.quantity || 1,
+              };
+              (session.extractedData.parts || []).push(np);
+              await sendText(sock, jid, explain || `✅ Añadida: ${np.name_original}`);
+              return;
+            }
+            if (action === 'rename_part' || action === 'fix_translation') {
+              const idx0 = (params.index || 1) - 1;
+              const p = session.extractedData.parts || [];
+              if (idx0 >= 0 && idx0 < p.length) {
+                if (params.name_dr) {
+                  p[idx0].name_dr = params.name_dr;
+                  p[idx0].name_original = params.name_dr;
+                }
+                if (params.name_english) p[idx0].name_english = params.name_english;
+                await sendText(sock, jid, explain || `✅ Pieza #${idx0 + 1} actualizada`);
+                return;
+              }
+            }
+            if (action === 're_extract_metadata') {
+              if (params.vehicle) {
+                session.extractedData.vehicle = {
+                  ...session.extractedData.vehicle,
+                  ...params.vehicle,
+                };
+              }
+              if (params.vin) session.extractedData.vin = params.vin;
+              await sendText(sock, jid, explain || '✅ Vehículo actualizado');
+              return;
+            }
+            if (action === 're_extract_parts') {
+              await sendText(sock, jid, explain ||
+                'Entendido — vuelve a enviar el documento para re-procesarlo.');
+              return;
+            }
+          }
+
+          // Final fallback — unchanged canonical message
           await sendText(sock, jid, session.lang === 'es'
             ? 'No te entendí 😅 ¿Cuál número está mal y cómo debe ser? Ej: _el #3 es un guardafango izquierdo_'
             : 'Not sure what you mean 😅 Which number is wrong and what should it be? E.g.: _#3 is a left fender_');

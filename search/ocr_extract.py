@@ -156,9 +156,133 @@ async def extract_from_image(image_path: str) -> dict:
         return {"error": str(e)}
 
 
+# ── Bug 5: VIN validation ─────────────────────────────────────────────────────
+import re as _re_vin
+
+_VIN_RE = _re_vin.compile(r'^[A-HJ-NPR-Z0-9]{17}$')
+
+def validate_vin(vin: str) -> bool:
+    """VIN must be 17 chars, alphanumeric, no I/O/Q."""
+    if not vin:
+        return False
+    v = vin.strip().upper()
+    return bool(_VIN_RE.match(v))
+
+
+# ── Bug 5: PDF metadata extraction (pass 1) ───────────────────────────────────
+# Regex patterns for the supplier-quote / damage-estimate header.
+_VEHICLE_LINE_RE = _re_vin.compile(r'Veh[ií]culo[:\s]+(.+?)(?:\n|$)', _re_vin.IGNORECASE)
+_CHASIS_RE = _re_vin.compile(r'Chasis\s*No\.?[:\s]+([A-HJ-NPR-Z0-9]{11,17})', _re_vin.IGNORECASE)
+_VIN_RE_LINE = _re_vin.compile(r'VIN[:\s]+([A-HJ-NPR-Z0-9]{11,17})', _re_vin.IGNORECASE)
+_RECLAMACION_RE = _re_vin.compile(r'Reclamaci[oó]n\s*No\.?[:\s]+(\S+)', _re_vin.IGNORECASE)
+_VEHICLE_YMM_RE = _re_vin.compile(r'(\d{4})\s+(\w+)\s+(.+)')
+
+
+def _extract_pdf_metadata_regex(page_text: str) -> dict:
+    """Pass 1: regex-based metadata extraction from page 1 text.
+    Returns dict with possible keys: vin, vehicle (year/make/model), claim_number.
+    Missing keys indicate regex miss."""
+    out: dict = {}
+
+    # VIN — prefer Chasis No. over VIN: if both present
+    vin = None
+    m = _CHASIS_RE.search(page_text) or _VIN_RE_LINE.search(page_text)
+    if m:
+        vin_candidate = m.group(1).strip().upper()
+        if validate_vin(vin_candidate):
+            vin = vin_candidate
+    if vin:
+        out["vin"] = vin
+
+    # Claim number
+    m = _RECLAMACION_RE.search(page_text)
+    if m:
+        out["claim_number"] = m.group(1).strip()
+
+    # Vehicle line → year/make/model
+    m = _VEHICLE_LINE_RE.search(page_text)
+    if m:
+        raw = m.group(1).strip()
+        ymm = _VEHICLE_YMM_RE.match(raw)
+        if ymm:
+            out["vehicle"] = {
+                "year": int(ymm.group(1)),
+                "make": ymm.group(2).strip(),
+                "model": ymm.group(3).strip(),
+                "trim": None,
+            }
+        else:
+            out["vehicle_raw"] = raw
+
+    return out
+
+
+_METADATA_VISION_PROMPT = """You are looking at the first page of a Dominican Republic auto supplier quote or damage-estimate PDF.
+
+Extract ONLY the vehicle metadata (NOT the parts list). Return raw JSON, no markdown:
+{
+  "vin": "17-char VIN or null",
+  "vehicle": {
+    "year": number_or_null,
+    "make": "string_or_null",
+    "model": "string_or_null",
+    "trim": "string_or_null"
+  },
+  "claim_number": "string_or_null"
+}
+
+The VIN is 17 characters, alphanumeric, no letters I/O/Q. It may be labeled "Chasis No.", "VIN", or similar.
+The vehicle year/make/model is usually near "Vehículo:" or in the header.
+The claim number may be labeled "Reclamación No.", "Claim No.", or "No. Reclamación".
+If a field is missing, use null. Do NOT guess."""
+
+
+async def _extract_pdf_metadata_vision(image_path: str) -> dict:
+    """Pass 1 fallback: Haiku vision call on page-1 image for metadata only."""
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return {}
+
+    try:
+        path = Path(image_path)
+        image_data = base64.standard_b64encode(path.read_bytes()).decode("utf-8")
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=512,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/png", "data": image_data,
+                    }},
+                    {"type": "text", "text": _METADATA_VISION_PROMPT},
+                ],
+            }],
+        )
+        text = response.content[0].text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+        data = json.loads(text)
+        # Validate VIN if present
+        if data.get("vin") and not validate_vin(data["vin"]):
+            data["vin"] = None
+        return data
+    except Exception as e:
+        logger.warning(f"Haiku metadata vision fallback failed: {e}")
+        return {}
+
+
 async def extract_from_pdf(pdf_path: str) -> dict:
     """Extract parts data from a PDF file.
-    Converts each page to an image, then extracts from the first page with content.
+
+    Bug 5 two-pass:
+      Pass 1 — metadata extraction from page 1 text (pdfplumber) with regex,
+               then Haiku vision fallback if regex missed VIN or vehicle.
+      Pass 2 — existing parts extraction (Sonnet vision per page, unchanged).
     """
     try:
         import fitz  # PyMuPDF
@@ -169,6 +293,24 @@ async def extract_from_pdf(pdf_path: str) -> dict:
     if not path.exists():
         return {"error": f"PDF not found: {pdf_path}"}
 
+    # ── Pass 1: metadata extraction ──────────────────────────────────────────
+    metadata: dict = {}
+    try:
+        import pdfplumber
+        with pdfplumber.open(str(path)) as pdf_doc:
+            if pdf_doc.pages:
+                page1_text = pdf_doc.pages[0].extract_text() or ""
+        metadata = _extract_pdf_metadata_regex(page1_text)
+        logger.info(
+            f"PDF metadata pass 1 (regex): vin={metadata.get('vin')} "
+            f"vehicle={metadata.get('vehicle')} claim={metadata.get('claim_number')}"
+        )
+    except ImportError:
+        logger.warning("pdfplumber not installed — skipping regex metadata pass")
+    except Exception as e:
+        logger.warning(f"pdfplumber metadata pass failed: {e}")
+
+    # ── Pass 2: per-page parts extraction via Sonnet vision ──────────────────
     try:
         doc = fitz.open(str(path))
         if doc.page_count == 0:
@@ -176,6 +318,7 @@ async def extract_from_pdf(pdf_path: str) -> dict:
 
         # Convert first 2 pages to images (most quotes are 1-2 pages)
         results = []
+        page1_image_path = None
         for page_num in range(min(doc.page_count, 2)):
             page = doc[page_num]
             pix = page.get_pixmap(dpi=200)
@@ -183,21 +326,51 @@ async def extract_from_pdf(pdf_path: str) -> dict:
             # Save as temp PNG
             temp_path = Path(pdf_path).parent / f"_temp_page_{page_num}.png"
             pix.save(str(temp_path))
+            if page_num == 0:
+                page1_image_path = str(temp_path)
 
             result = await extract_from_image(str(temp_path))
 
-            # Clean up temp file
-            try:
-                temp_path.unlink()
-            except OSError:
-                pass
+            # Clean up temp file AFTER we may have used page1_image_path for fallback
+            if page_num != 0:
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
 
             if not result.get("error") and result.get("parts"):
                 results.append(result)
 
         doc.close()
 
+        # Haiku fallback for metadata if regex missed it — uses page 1 image
+        if page1_image_path:
+            need_vision = (not metadata.get("vin") or not metadata.get("vehicle"))
+            if need_vision:
+                logger.info("Regex metadata incomplete — trying Haiku vision fallback")
+                vision_meta = await _extract_pdf_metadata_vision(page1_image_path)
+                if vision_meta.get("vin") and not metadata.get("vin"):
+                    metadata["vin"] = vision_meta["vin"]
+                if vision_meta.get("vehicle") and not metadata.get("vehicle"):
+                    metadata["vehicle"] = vision_meta["vehicle"]
+                if vision_meta.get("claim_number") and not metadata.get("claim_number"):
+                    metadata["claim_number"] = vision_meta["claim_number"]
+            # Clean up page 1 temp file now
+            try:
+                Path(page1_image_path).unlink()
+            except OSError:
+                pass
+
         if not results:
+            # No parts extracted — still return metadata if we have it
+            if metadata.get("vin") or metadata.get("vehicle"):
+                return {
+                    "vin": metadata.get("vin"),
+                    "vehicle": metadata.get("vehicle"),
+                    "claim_number": metadata.get("claim_number"),
+                    "parts": [],
+                    "error": "Could not extract parts from any PDF page (metadata only)",
+                }
             return {"error": "Could not extract parts from any PDF page"}
 
         # Merge results from multiple pages (parts from page 2 extend page 1)
@@ -212,6 +385,19 @@ async def extract_from_pdf(pdf_path: str) -> dict:
             if not merged.get("vin") and extra.get("vin"):
                 merged["vin"] = extra["vin"]
                 merged["vehicle"] = extra.get("vehicle")
+
+        # Bug 5: metadata pass 1 wins — it's more reliable than vision-OCR for VIN/vehicle.
+        if metadata.get("vin") and validate_vin(metadata["vin"]):
+            merged["vin"] = metadata["vin"]
+        if metadata.get("vehicle"):
+            merged["vehicle"] = metadata["vehicle"]
+        if metadata.get("claim_number"):
+            merged["claim_number"] = metadata["claim_number"]
+
+        # Final VIN validation
+        if merged.get("vin") and not validate_vin(merged["vin"]):
+            logger.warning(f"VIN '{merged['vin']}' failed validation (len/charset) — clearing")
+            merged["vin"] = None
 
         return merged
 

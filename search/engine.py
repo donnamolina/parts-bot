@@ -27,6 +27,7 @@ from .rockauto_search import (
     load_cache as load_ra_cache, save_cache as save_ra_cache,
 )
 from .cost_calculator import calculate_landed_cost
+from .manual_review import classify_part, MANUAL_REVIEW_NOTES
 
 logger = logging.getLogger("parts-bot.engine")
 
@@ -136,6 +137,18 @@ async def search_single_part(
         oem_number = part.get("part_number") or part.get("oem_number") or ""
         vin = vehicle_info.get("vin", "")
 
+        # Bug 10: manual-review routing. Classify airbags, windshields, modules etc.
+        # These parts skip the eBay pipeline but still try 7zap so we have an OEM#
+        # for a dealer quote.
+        _manual_class = classify_part(part_english)
+        if _manual_class:
+            result["manual_review"] = _manual_class
+            result["manual_review_note"] = MANUAL_REVIEW_NOTES[_manual_class]
+            logger.info(
+                f"Manual-review routing for '{part_english}': "
+                f"{_manual_class} — skipping eBay"
+            )
+
         import os as _os
         _use_7zap = _os.getenv("OEM_LOOKUP_SOURCE", "7zap").lower() == "7zap" and bool(vin)
 
@@ -167,6 +180,28 @@ async def search_single_part(
             except SevenZapAuthError as _e:
                 logger.error(f"7zap cookies expired — falling back to RockAuto: {_e}")
                 _use_7zap = False
+
+        # Bug 10: For manual-review parts, stop here — skip RockAuto fallback and eBay.
+        # Still return a minimal best_option with the OEM# (if 7zap found one) so the
+        # Excel row shows the part_number for dealer quoting.
+        if _manual_class:
+            if _is_real_oem(oem_number):
+                result["best_option"] = {
+                    "price": None,
+                    "shipping": 0,
+                    "total_price": None,
+                    "part_number": oem_number,
+                    "brand": "",
+                    "condition": "",
+                    "source": "Manual Review",
+                    "url": "",
+                    "title": "",
+                    "tier": "",
+                    "availability": "Manual Review",
+                    "delivery_days_min": None,
+                    "delivery_days_max": None,
+                }
+            return result
 
         # RockAuto: fallback when 7zap is disabled/failed/returned nothing.
         # Still used for fitment data even when 7zap returns an OEM#.

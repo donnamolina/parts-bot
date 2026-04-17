@@ -49,6 +49,10 @@ def _style_data(cell, bg=WHITE, bold=False, align="left"):
 
 def _confidence_label(result: dict, is_flagged: bool) -> str:
     """Compute confidence label for a single result row."""
+    # Bug 10: manual-review parts (airbags, windshields, modules) skip the
+    # eBay pipeline and are routed for manual review.
+    if result.get("manual_review"):
+        return "🔧 Manual"
     if result.get("from_cache"):
         return "✅ Verificado"
     # Sonnet verdicts that override everything else
@@ -433,8 +437,14 @@ def generate_excel(results: list, vehicle_info: dict, output_path: str,
         # Confianza (col 13)
         conf_label = _confidence_label(result, (i - 1) in flagged_indices)
         conf_cell = ws.cell(row=row, column=13, value=conf_label)
-        conf_bg = (GREEN_BG if "✅" in conf_label or "🟢" in conf_label
-                   else YELLOW_BG if "🟡" in conf_label else ORANGE_BG)
+        if "🔧" in conf_label:
+            conf_bg = YELLOW_BG   # Bug 10: manual-review
+        elif "✅" in conf_label or "🟢" in conf_label:
+            conf_bg = GREEN_BG
+        elif "🟡" in conf_label:
+            conf_bg = YELLOW_BG
+        else:
+            conf_bg = ORANGE_BG
         _style_data(conf_cell, bg=conf_bg, align="center")
 
         # Source (col 14)
@@ -454,11 +464,16 @@ def generate_excel(results: list, vehicle_info: dict, output_path: str,
             ws.cell(row=row, column=15, value="N/F")
             _style_data(ws.cell(row=row, column=15), bg=bg, align="center")
 
-        # Nota (col 16) — Sonnet per-listing verification result + side/set notes
+        # Nota (col 16) — Sonnet per-listing verification result + side/set notes.
+        # Bug 10: manual_review takes priority — the part was routed to manual review
+        # and eBay was skipped, so other notes don't apply.
         sv = result.get("sonnet_verify") or {}
         verdict = sv.get("verdict", "")
         note_text = sv.get("note", "")
-        if verdict == "WRONG_PART":
+        if result.get("manual_review"):
+            nota_val = f"🔧 {result.get('manual_review_note', '')}"
+            nota_bg = YELLOW_BG
+        elif verdict == "WRONG_PART":
             nota_val = f"⚠️ Pieza incorrecta: {note_text}" if note_text else "⚠️ Pieza incorrecta"
             nota_bg = ORANGE_BG
         elif verdict == "OEM_MISMATCH":
