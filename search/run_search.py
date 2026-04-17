@@ -309,6 +309,7 @@ async def main():
                     listing_title=_b.get("title", ""),
                     price=_b.get("price", 0),
                     api_key=_api_key,
+                    oem_description=_r.get("oem_description", ""),
                 )
                 for _r, _p, _b in _to_verify
             ]
@@ -322,101 +323,6 @@ async def main():
                     logger.info(
                         f"Listing verify: '{_p.get('name_english')}' → "
                         f"{_verdict['verdict']}: {_verdict['note']}"
-                    )
-
-        # ── WRONG_PART retry: discard bad OEM#, retry with name-based eBay search ──
-        _wrong_parts = [
-            (_r, _p, _b) for (_r, _p, _b) in _to_verify
-            if (_r.get("sonnet_verify") or {}).get("verdict") == "WRONG_PART"
-        ]
-        if _wrong_parts:
-            logger.info(f"WRONG_PART retry: {len(_wrong_parts)} part(s) to retry with name search")
-            from search.ebay_search import search_ebay, get_ebay_token
-            from search.cost_calculator import calculate_landed_cost
-            _ebay_token = await get_ebay_token()
-
-            _retry_coros = []
-            _retry_refs = []
-            for _r, _p, _b in _wrong_parts:
-                _part_en = _p.get("name_english", "")
-                _side = _p.get("side")
-                # Use more specific search terms for certain part types to avoid
-                # unrelated products (e.g. "running board" can return hitch steps)
-                _STEP_SYNONYMS = {
-                    "running board": "running board side step",
-                    "step bar": "running board side step bar",
-                }
-                _search_term = _STEP_SYNONYMS.get(_part_en.lower(), _part_en)
-                _nm_q = (
-                    f"{vehicle_info.get('year')} {vehicle_info.get('make')} "
-                    f"{vehicle_info.get('model')} {_search_term} {_side or ''}"
-                ).strip()
-                _retry_coros.append(search_ebay(
-                    query=_nm_q,
-                    side=_side,
-                    _token=_ebay_token,
-                    part_english=_part_en,
-                ))
-                _retry_refs.append((_r, _p))
-
-            _retry_ebay = await asyncio.gather(*_retry_coros, return_exceptions=True)
-
-            _reverify_coros = []
-            _reverify_refs = []
-            for (_r, _p), _ebay_res in zip(_retry_refs, _retry_ebay):
-                if isinstance(_ebay_res, Exception) or not _ebay_res:
-                    logger.warning(f"WRONG_PART retry: no eBay results for '{_p.get('name_english')}'")
-                    continue
-                _listing = _ebay_res[0]
-                _reverify_coros.append(verify_ebay_listing(
-                    part_name_english=_p.get("name_english", ""),
-                    year=vehicle_info.get("year", 0),
-                    make=vehicle_info.get("make", ""),
-                    model=vehicle_info.get("model", ""),
-                    oem_number="",
-                    listing_title=_listing.get("title", ""),
-                    price=_listing.get("price", 0),
-                    api_key=_api_key,
-                ))
-                _reverify_refs.append((_r, _p, _listing))
-
-            if _reverify_coros:
-                _reverify_v = await asyncio.gather(*_reverify_coros, return_exceptions=True)
-                for (_r, _p, _listing), _v in zip(_reverify_refs, _reverify_v):
-                    if isinstance(_v, Exception):
-                        continue
-                    _part_en = _p.get("name_english", "")
-                    # Bug 16 guardrail: if name-fallback retry ALSO comes back WRONG_PART,
-                    # mark as N/F (clear listing). Do NOT retry with another search.
-                    if (_v.get("verdict") or "") == "WRONG_PART":
-                        _r["best_option"] = None
-                        _r["ebay"] = None
-                        _r["oem_source"] = "name_fallback_rejected"
-                        _r["oem_confidence"] = "red"
-                        _r["sonnet_verify"] = _v
-                        _r.pop("landed_cost", None)
-                        logger.info(
-                            f"WRONG_PART retry '{_part_en}': "
-                            f"name-fallback ALSO wrong → marked N/F (no further retry). "
-                            f"note={_v.get('note','')}"
-                        )
-                        continue
-                    # Replace result with name-based listing, clear bad OEM#
-                    _listing["part_number"] = ""
-                    _r["ebay"] = _listing
-                    _r["best_option"] = _listing
-                    _r["oem_source"] = "name_fallback"
-                    _r["oem_confidence"] = "yellow"
-                    _r["sonnet_verify"] = _v
-                    if _listing.get("price"):
-                        _r["landed_cost"] = calculate_landed_cost(
-                            listing_price_usd=_listing["price"],
-                            us_shipping_usd=_listing.get("shipping", 0),
-                            part_name_english=_part_en,
-                        )
-                    logger.info(
-                        f"WRONG_PART retry '{_part_en}': verdict={_v.get('verdict')} "
-                        f"listing='{_listing.get('title','')[:60]}'"
                     )
 
     # Sonnet end-of-batch verification pass
