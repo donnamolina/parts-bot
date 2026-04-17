@@ -137,7 +137,9 @@ async def search_single_part(
         if _use_7zap:
             try:
                 from .oem_lookup_7zap import lookup_oem_by_vin, SevenZapAuthError
-                _zap = await lookup_oem_by_vin(vin, part_english, make_hint=vehicle_info.get("make"))
+                # Prepend side so 7zap sets req_side correctly and caches per-side
+                _zap_query = f"{side} {part_english}" if side else part_english
+                _zap = await lookup_oem_by_vin(vin, _zap_query, make_hint=vehicle_info.get("make"))
                 if _zap.oem_number:
                     oem_number = _zap.oem_number
                     result["oem_source"] = _zap.source
@@ -233,6 +235,10 @@ async def search_single_part(
         result["best_option"] = _pick_best_option(
             result["rockauto"], result["ebay"], part
         )
+
+        # Inject 7zap OEM# into best_option — _pick_best_option only carries RockAuto's OEM#
+        if result["best_option"] and oem_number and result.get("oem_source", "").startswith("7zap"):
+            result["best_option"]["part_number"] = oem_number
 
         # Step 4: Calculate landed cost if we have a price
         best = result["best_option"]

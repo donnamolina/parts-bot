@@ -59,10 +59,14 @@ def _confidence_label(result: dict, is_flagged: bool) -> str:
     # Cross-platform OEM# — number came from a different car's catalog
     if result.get("oem_platform_mismatch"):
         return "🔴 Verificar plataforma"
-    # OEM# present = high confidence; eBay match without OEM# = medium
     pn = best.get("part_number") or ""
     import re as _re
     is_real_oem = bool(pn and _re.search(r'\d', pn) and 5 <= len(pn) <= 18 and not pn.isalpha())
+    # 7zap VIN-exact lookup — show source-specific label
+    oem_source = result.get("oem_source", "")
+    if oem_source.startswith("7zap"):
+        return "🟢 7zap VIN" if is_real_oem else "🟡 7zap verificar"
+    # Generic labels for RockAuto-sourced OEM# or name-only searches
     if is_real_oem:
         return "🟢 Alto"
     if best.get("price", 0) > 0:
