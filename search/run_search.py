@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -24,11 +25,17 @@ from search.db_client import (
     get_correction_override, get_cached_result, upsert_cached_result_safe
 )
 
+# Rotating log: 10 MB per file, keep 5 backups (~50 MB cap)
+_LOG_DIR = Path(__file__).parent.parent / "logs"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+_rotating_handler = RotatingFileHandler(
+    _LOG_DIR / "searches.log", maxBytes=10 * 1024 * 1024, backupCount=5
+)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s: %(message)s",
     handlers=[
-        logging.FileHandler(Path(__file__).parent.parent / "logs" / "searches.log"),
+        _rotating_handler,
         logging.StreamHandler(sys.stderr),
     ]
 )

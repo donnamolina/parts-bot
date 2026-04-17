@@ -7,11 +7,13 @@ Migrated from existing code with improvements:
 - Better part number extraction and brand classification
 """
 
+import os
 import re
 import json
 import time
 import logging
 import datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple, Any
 from urllib.parse import unquote_plus
@@ -55,15 +57,27 @@ from .dictionary import PART_TO_CATEGORY
 
 logger = logging.getLogger("parts-bot.rockauto")
 
-# ─── Temporary debug helpers ──────────────────────────────────────────────────
-_RA_DEBUG_ACTIVE = True  # set to False after first search_rockauto call
+# ─── RockAuto debug logging (gated by RA_DEBUG env var) ───────────────────────
+# Set RA_DEBUG=true in .env to enable (default: off). Writes to logs/ra_debug.log
+# with 10 MB rotation, 5 backups.
+_RA_DEBUG_ACTIVE = os.environ.get("RA_DEBUG", "false").lower() == "true"
 _DEBUG_LOG_PATH = Path(__file__).parent.parent / "logs" / "ra_debug.log"
 
+_ra_debug_logger = logging.getLogger("parts-bot.rockauto.debug")
+if _RA_DEBUG_ACTIVE and not _ra_debug_logger.handlers:
+    _DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _ra_handler = RotatingFileHandler(
+        _DEBUG_LOG_PATH, maxBytes=10 * 1024 * 1024, backupCount=5
+    )
+    _ra_handler.setFormatter(logging.Formatter("%(asctime)s [DEBUG-RA] %(message)s"))
+    _ra_debug_logger.addHandler(_ra_handler)
+    _ra_debug_logger.setLevel(logging.DEBUG)
+    _ra_debug_logger.propagate = False
+
 def _debug_log(msg: str):
-    import datetime
-    line = f"{datetime.datetime.utcnow().isoformat()} [DEBUG-RA] {msg}\n"
-    with open(_DEBUG_LOG_PATH, "a") as f:
-        f.write(line)
+    if not _RA_DEBUG_ACTIVE:
+        return
+    _ra_debug_logger.debug(msg)
 
 CACHE_PATH = Path(__file__).parent.parent / "cache" / "rockauto_cache.json"
 CACHE_TTL_HOURS = 24
@@ -407,7 +421,7 @@ async def search_rockauto(
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     """Search RockAuto for parts. Returns (results_list, error_message)."""
 
-    _debug = True  # debug ALL parts
+    _debug = _RA_DEBUG_ACTIVE  # gated by RA_DEBUG env var
 
     # Map part query to category
     cat_match = find_matching_category(part_query)

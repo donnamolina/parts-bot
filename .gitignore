@@ -1,6 +1,7 @@
 # Secrets & credentials
 .env
 .env.*
+!.env.example
 
 # WhatsApp session data
 auth_info/
@@ -24,6 +25,9 @@ logs/
 .health_fails
 *.sqlite
 *.db
+
+# Backups (PR B4)
+backups/
 
 # WhatsApp QR / session state
 sessions.json
