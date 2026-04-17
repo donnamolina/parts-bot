@@ -10,6 +10,8 @@ import asyncio
 import logging
 import os
 
+_SONNET_MODEL = os.environ.get("ANTHROPIC_SONNET_MODEL", "claude-sonnet-4-6")
+
 logger = logging.getLogger("parts-bot.verify")
 
 VERIFY_PROMPT = """\
@@ -69,7 +71,7 @@ async def verify_ebay_listing(
             price=f"{price:.2f}",
         )
         msg = await client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=_SONNET_MODEL,
             max_tokens=60,
             messages=[{"role": "user", "content": prompt}],
         )

@@ -11,6 +11,8 @@ from pathlib import Path
 
 import anthropic
 
+_SONNET_MODEL = os.environ.get("ANTHROPIC_SONNET_MODEL", "claude-sonnet-4-6")
+
 logger = logging.getLogger("parts-bot.ocr")
 
 _TRANSLATION_CACHE_PATH = Path(__file__).parent.parent / "cache" / "translation_cache.json"
@@ -112,7 +114,7 @@ async def extract_from_image(image_path: str) -> dict:
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-6",
+            model=_SONNET_MODEL,
             max_tokens=4096,
             messages=[{
                 "role": "user",
@@ -424,7 +426,7 @@ async def translate_unknown_part(part_name_dr: str, vehicle_context: str) -> str
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-6",
+            model=_SONNET_MODEL,
             max_tokens=100,
             messages=[{
                 "role": "user",

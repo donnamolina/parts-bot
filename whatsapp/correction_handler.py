@@ -25,6 +25,8 @@ from pathlib import Path
 
 import anthropic
 
+_SONNET_MODEL = os.environ.get("ANTHROPIC_SONNET_MODEL", "claude-sonnet-4-6")
+
 logger = logging.getLogger("parts-bot.correction")
 
 ACTION_ENUM = (
@@ -144,7 +146,7 @@ def handle_correction(
         client = anthropic.Anthropic(api_key=api_key)
         user_prompt = _build_user_prompt(parts, vehicle, history, user_message)
         resp = client.messages.create(
-            model="claude-sonnet-4-6",
+            model=_SONNET_MODEL,
             max_tokens=512,
             system=_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
