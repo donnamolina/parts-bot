@@ -45,6 +45,31 @@ const LOG_DIR = path.join(__dirname, 'logs');
 const PYTHON = path.join(__dirname, '.venv', 'bin', 'python3');
 const SONNET_MODEL = process.env.ANTHROPIC_SONNET_MODEL || "claude-sonnet-4-6";
 
+// ─── v11 Agentic Feature Flag ───────────────────────────────────────────────
+// When V11_AGENTIC_ENABLED=true AND the sender's phone is in V11_USER_ALLOWLIST,
+// messages route to the new Sonnet agent loop instead of the legacy state machine.
+// Legacy code path is left untouched in the else branch so we can flip the flag
+// back instantly if the agent misbehaves.
+const V11_AGENTIC_ENABLED = (process.env.V11_AGENTIC_ENABLED || 'false').toLowerCase() === 'true';
+const V11_USER_ALLOWLIST = (process.env.V11_USER_ALLOWLIST || '')
+  .split(',')
+  .map(n => n.trim().replace(/[^0-9]/g, ''))
+  .filter(Boolean);
+const V11_INTERNAL_PORT = parseInt(process.env.V11_INTERNAL_PORT || '3019', 10);
+const V11_AGENT_SCRIPT = path.join(__dirname, 'agent', 'run_agent.py');
+const V11_TURN_TIMEOUT_MS = parseInt(process.env.V11_TURN_TIMEOUT_SECONDS || '300', 10) * 1000;
+
+function v11ShouldRoute(jid) {
+  if (!V11_AGENTIC_ENABLED) return false;
+  if (V11_USER_ALLOWLIST.length === 0) return false;
+  const num = (jid || '').replace(/[^0-9]/g, '').replace(/@.*/, '');
+  const last10 = num.slice(-10);
+  return V11_USER_ALLOWLIST.some(a => {
+    const aLast10 = a.slice(-10);
+    return last10 === aLast10 || num.includes(a) || a.includes(num);
+  });
+}
+
 // ─── formatPartsList helper ─────────────────────────────────────────────────
 // Single source of truth for the confirmation/review bulleted list.
 // Replaces 4 near-duplicate renderer blocks across server.js (pre-v11 cleanup).
@@ -847,6 +872,176 @@ async function runSearchPipeline(sock, jid, extractedData) {
   }
 }
 
+// ─── v11 Agent Turn ─────────────────────────────────────────────────────────
+// Spawns the Python agent CLI (agent/run_agent.py) as a subprocess, pipes a JSON
+// payload in on stdin, reads a single JSON result on stdout, then dispatches any
+// text / file outputs back to the user via the usual sendText / sendDocument.
+async function handleAgentTurn(sock, jid, userText, attachments) {
+  const phone = (jid || '').replace(/[^0-9]/g, '').replace(/@.*/, '');
+  const payload = {
+    user_id: phone,
+    message: userText || '',
+    attachments: (attachments || []).map(a => ({
+      path: a.path,
+      type: a.type || a.mime || '',
+      mime: a.mime || a.type || '',
+    })),
+  };
+
+  const env = {
+    ...process.env,
+    PYTHONPATH: __dirname,
+    V11_INTERNAL_PORT: String(V11_INTERNAL_PORT),
+    AGENT_JID: jid || '',
+  };
+
+  const started = Date.now();
+  consoleLog(`[v11] agent turn begin phone=${phone} text_len=${(userText || '').length} attachments=${payload.attachments.length}`);
+
+  const result = await new Promise((resolve) => {
+    let settled = false;
+    const proc = spawn(PYTHON, [V11_AGENT_SCRIPT], {
+      cwd: __dirname,
+      env,
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { proc.kill('SIGKILL'); } catch (_) { /* noop */ }
+      consoleLog(`[v11] agent turn TIMEOUT after ${V11_TURN_TIMEOUT_MS}ms phone=${phone}`);
+      resolve({
+        text: 'Disculpa, la búsqueda está tardando más de lo normal. Intenta de nuevo en un momento.',
+        files: [],
+        _timeout: true,
+      });
+    }, V11_TURN_TIMEOUT_MS);
+
+    proc.stdout.on('data', d => { stdout += d.toString(); });
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+
+    proc.on('close', code => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code !== 0) {
+        consoleLog(`[v11] agent exit code=${code} phone=${phone} stderr=${stderr.slice(-500)}`);
+        resolve({
+          text: 'Disculpa, hubo un error procesando tu mensaje. Intenta de nuevo.',
+          files: [],
+          _exit_code: code,
+        });
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout.trim().split('\n').pop() || '{}'));
+      } catch (e) {
+        consoleLog(`[v11] agent stdout parse error: ${e.message} raw=${stdout.slice(0, 400)}`);
+        resolve({
+          text: 'Disculpa, hubo un error procesando tu mensaje. Intenta de nuevo.',
+          files: [],
+          _parse_error: e.message,
+        });
+      }
+    });
+
+    proc.on('error', e => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      consoleLog(`[v11] agent spawn error: ${e.message}`);
+      resolve({
+        text: 'Disculpa, hubo un error procesando tu mensaje. Intenta de nuevo.',
+        files: [],
+        _spawn_error: e.message,
+      });
+    });
+
+    try {
+      proc.stdin.write(JSON.stringify(payload));
+      proc.stdin.end();
+    } catch (e) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      consoleLog(`[v11] agent stdin error: ${e.message}`);
+      resolve({
+        text: 'Disculpa, hubo un error procesando tu mensaje. Intenta de nuevo.',
+        files: [],
+        _stdin_error: e.message,
+      });
+    }
+  });
+
+  const elapsedMs = Date.now() - started;
+  consoleLog(`[v11] agent turn done phone=${phone} elapsed_ms=${elapsedMs} text_len=${(result.text || '').length} files=${(result.files || []).length}`);
+
+  // Deliver: text first, then any queued files (Excel / attachments).
+  if (result.text && String(result.text).trim()) {
+    await sendText(sock, jid, String(result.text));
+  }
+  for (const f of result.files || []) {
+    if (!f || !f.path) continue;
+    try {
+      await sendDocument(sock, jid, f.path, f.name || path.basename(f.path));
+    } catch (e) {
+      consoleLog(`[v11] sendDocument error: ${e.message}`);
+    }
+  }
+}
+
+// ─── v11 Internal HTTP Endpoint ─────────────────────────────────────────────
+// Surface that Python tools (notably send_document) can hit to push a file out
+// of band. Using Node's built-in `http` to avoid adding an express dependency.
+// Bind loopback-only; tokens are not required since traffic never leaves the box.
+function startV11InternalServer(getSock) {
+  const http = require('http');
+  const server = http.createServer(async (req, res) => {
+    if (req.method !== 'POST' || req.url !== '/internal/send-document') {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'not_found' }));
+      return;
+    }
+    let body = '';
+    req.on('data', chunk => { body += chunk.toString(); if (body.length > 1_000_000) req.destroy(); });
+    req.on('end', async () => {
+      try {
+        const j = JSON.parse(body || '{}');
+        const jid = j.jid || (j.phone ? `${String(j.phone).replace(/[^0-9]/g, '')}@s.whatsapp.net` : null);
+        const filePath = j.path;
+        const fileName = j.name || (filePath ? path.basename(filePath) : 'document');
+        if (!jid || !filePath || !fs.existsSync(filePath)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'bad_payload' }));
+          return;
+        }
+        const sock = typeof getSock === 'function' ? getSock() : null;
+        if (!sock) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'sock_unavailable' }));
+          return;
+        }
+        await sendDocument(sock, jid, filePath, fileName);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+    });
+  });
+  server.listen(V11_INTERNAL_PORT, '127.0.0.1', () => {
+    consoleLog(`[v11] internal HTTP endpoint listening on 127.0.0.1:${V11_INTERNAL_PORT}`);
+  });
+  server.on('error', e => {
+    consoleLog(`[v11] internal HTTP error: ${e.message}`);
+  });
+  return server;
+}
+
 // ─── Message Handler ────────────────────────────────────────────────────────
 
 async function handleMessage(sock, msg) {
@@ -860,9 +1055,51 @@ async function handleMessage(sock, msg) {
     return;
   }
 
-  const session = getSession(jid);
   const message = msg.message;
   if (!message) return;
+
+  // ── v11 AGENTIC ROUTE ────────────────────────────────────────────────────
+  // Feature-flagged + per-user allowlisted. On a match, we bypass the legacy
+  // state machine entirely. Legacy code stays below untouched so flipping the
+  // flag back is instant.
+  if (v11ShouldRoute(jid)) {
+    try {
+      const vUserText = message.conversation
+        || message.extendedTextMessage?.text
+        || message.imageMessage?.caption
+        || message.documentMessage?.caption
+        || '';
+
+      const vImageMsg = message.imageMessage;
+      const vDocMsg = message.documentMessage;
+      const vHasImage = !!vImageMsg;
+      const vHasPdf = vDocMsg && (vDocMsg.mimetype || '').includes('pdf');
+      const vAttachments = [];
+
+      if (vHasImage || vHasPdf) {
+        const ext = vHasImage ? '.jpg' : '.pdf';
+        const mime = vHasImage ? (vImageMsg.mimetype || 'image/jpeg') : (vDocMsg.mimetype || 'application/pdf');
+        try {
+          const buffer = await downloadMediaMessage(msg, 'buffer', {});
+          const mediaPath = path.join(OUTPUT_DIR, `v11_${Date.now()}${ext}`);
+          fs.writeFileSync(mediaPath, buffer);
+          vAttachments.push({ path: mediaPath, type: mime, mime });
+        } catch (e) {
+          consoleLog(`[v11] media download error: ${e.message}`);
+          await sendText(sock, jid, 'Uy, no pude descargar tu archivo. Intenta de nuevo.');
+          return;
+        }
+      }
+
+      await handleAgentTurn(sock, jid, vUserText, vAttachments);
+    } catch (e) {
+      consoleLog(`[v11] handleAgentTurn error: ${e.message}`);
+      await sendText(sock, jid, 'Disculpa, hubo un error procesando tu mensaje. Intenta de nuevo.');
+    }
+    return;
+  }
+
+  const session = getSession(jid);
 
   // Detect language from text
   const textContent = message.conversation
@@ -1754,6 +1991,17 @@ async function startBot() {
       consoleLog('✅ Parts-Bot connected to WhatsApp');
       consoleLog(`📋 Allowed numbers: ${ALLOWED_NUMBERS.length > 0 ? ALLOWED_NUMBERS.join(', ') : 'ALL (no whitelist)'}`);
       _globalSock = sock;
+      if (V11_AGENTIC_ENABLED && !global._v11_internal_started) {
+        try {
+          startV11InternalServer(() => _globalSock);
+          global._v11_internal_started = true;
+          consoleLog(`[v11] agentic routing ENABLED — allowlist size=${V11_USER_ALLOWLIST.length}`);
+        } catch (e) {
+          consoleLog(`[v11] internal server startup error: ${e.message}`);
+        }
+      } else if (!V11_AGENTIC_ENABLED) {
+        consoleLog('[v11] agentic routing disabled (V11_AGENTIC_ENABLED=false)');
+      }
     }
   });
 
