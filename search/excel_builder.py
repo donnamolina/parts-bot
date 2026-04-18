@@ -326,6 +326,11 @@ def generate_excel(results: list, vehicle_info: dict, output_path: str,
     # ── Data rows (starting row 4) ──
     total_landed = 0
     parts_found = 0
+    cnt_verified = 0   # ✅ from cache / high confidence
+    cnt_medio = 0      # 🟡 usable but needs review
+    cnt_revisar = 0    # 🔴 Sonnet flagged wrong part
+    cnt_manual = 0     # 🔧 dealer/local/manual
+    cnt_no_result = 0  # ⬛ no eBay result
     max_delivery_days = 0
     any_delivery_known = False
 
@@ -413,6 +418,19 @@ def generate_excel(results: list, vehicle_info: dict, output_path: str,
             total_landed += landed_dop_total
             parts_found += 1
 
+        # Tier counters for footer breakdown
+        _conf = _confidence_label(result, (i - 1) in flagged_indices)
+        if result.get("manual_review"):
+            cnt_manual += 1
+        elif not result.get("best_option"):
+            cnt_no_result += 1
+        elif _conf.startswith("✅"):
+            cnt_verified += 1
+        elif _conf.startswith("🔴"):
+            cnt_revisar += 1
+        else:
+            cnt_medio += 1
+
         # Delivery days (col 12) — eBay only; RockAuto has no estimate
         if best:
             d_min = best.get("delivery_days_min")
@@ -493,6 +511,12 @@ def generate_excel(results: list, vehicle_info: dict, output_path: str,
         else:
             nota_val = ""
             nota_bg = bg
+        # Append OEM duplicate warning if present (Bug 34/35 guardrail)
+        dup_note = result.get("duplicate_oem_note", "")
+        if dup_note:
+            nota_val = f"{nota_val} | {dup_note}".strip(" | ") if nota_val else dup_note
+            if nota_bg == bg:
+                nota_bg = YELLOW_BG
         nota_cell = ws.cell(row=row, column=16, value=nota_val)
         _style_data(nota_cell, bg=nota_bg)
         if nota_val:
@@ -550,7 +574,16 @@ def generate_excel(results: list, vehicle_info: dict, output_path: str,
 
     # Stats row
     sr2 = sr_sup + 1
-    ws.cell(row=sr2, column=6, value=f"Encontradas: {parts_found}/{len(results)} piezas")
+    total = len(results)
+    tier_summary = (
+        f"Resumen ({total} piezas):  "
+        f"✅ {cnt_verified}  |  "
+        f"🟡 {cnt_medio}  |  "
+        f"🔴 {cnt_revisar}  |  "
+        f"🔧 {cnt_manual}  |  "
+        f"⬛ {cnt_no_result}"
+    )
+    ws.cell(row=sr2, column=6, value=tier_summary)
     _style_data(ws.cell(row=sr2, column=6), bg=LIGHT_GRAY)
 
     # Delivery benchmark row
