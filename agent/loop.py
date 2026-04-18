@@ -51,7 +51,8 @@ def _build_user_content(user_message: str, attachments: list[dict] | None) -> An
     agent calls extract_from_media to actually process them).
     """
     if not attachments:
-        return user_message or ""
+        # Empty string would cause API 400 "user messages must have non-empty content"
+        return user_message or "[mensaje vacío]"
     text = user_message or ""
     blocks: list[dict] = []
     if text.strip():
