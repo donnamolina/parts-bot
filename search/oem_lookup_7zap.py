@@ -251,7 +251,7 @@ class OemLookupResult:
     oem_number: str | None = None
     part_name: str | None = None
     confidence: Literal["green", "yellow", "red"] = "red"
-    source: Literal["7zap_vin_exact", "7zap_fuzzy", "rockauto_fallback", "name_only_fallback"] = "name_only_fallback"
+    source: Literal["7zap_vin_exact", "7zap_fuzzy", "rockauto_fallback", "name_only_fallback", "vin_not_in_catalog"] = "name_only_fallback"
     candidates: list[dict] = field(default_factory=list)
     error: str | None = None
 
@@ -791,6 +791,15 @@ async def lookup_oem_by_vin(
             logger.info(f"7zap: fetching VIN tree for {vin}")
             tree = await client.get_vin_tree(vin)
             if not tree.get("tree"):
+                if tree.get("type") == "vin_not_found":
+                    logger.info(
+                        f"7zap: VIN {vin} not in catalog (vin_not_found) "
+                        f"-- likely LATAM market vehicle. eBay name-search only."
+                    )
+                    return OemLookupResult(
+                        error=f"7zap catalog no disponible para VIN {vin}",
+                        source="vin_not_in_catalog",
+                    )
                 return OemLookupResult(error=f"7zap returned empty tree for VIN {vin}")
             cache.store_tree(tree)
         else:
