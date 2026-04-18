@@ -188,6 +188,8 @@ async def search_all_parts(
     vehicle: dict,
     parts: list[dict],
     session_code: str | None = None,
+    supplier_total_dop: float | None = None,
+    supplier_quotes: list | None = None,
 ) -> dict:
     """Run the full search pipeline. Returns {results, excel_path, session_code, summary}."""
     from search import engine  # type: ignore
@@ -215,7 +217,7 @@ async def search_all_parts(
     excel_path = str(_ROOT / "output" / excel_filename)
     Path(excel_path).parent.mkdir(parents=True, exist_ok=True)
     try:
-        generate_excel(results, vehicle, excel_path, supplier_total_dop=None, sonnet_flags=[])
+        generate_excel(results, vehicle, excel_path, supplier_total_dop=supplier_total_dop, supplier_quotes=supplier_quotes or [], sonnet_flags=[])
     except Exception as e:
         logger.error(f"excel gen failed: {e}")
         excel_path = None

@@ -143,6 +143,7 @@ async def main():
     vehicle_from_ocr = extraction.get("vehicle", {})
     parts_raw = extraction.get("parts", [])
     supplier_total_dop = extraction.get("supplier_total_dop")
+    supplier_quotes = extraction.get("supplier_quotes") or []
 
     if not parts_raw:
         json.dump({"error": "No parts in extraction data"}, sys.stdout)
@@ -358,6 +359,7 @@ async def main():
     logger.info(f"Generating Excel: {args.output}")
     generate_excel(results, vehicle_info, args.output,
                    supplier_total_dop=supplier_total_dop,
+                   supplier_quotes=supplier_quotes,
                    sonnet_flags=sonnet_flags)
 
     # Calculate summary

@@ -179,6 +179,8 @@ def parse_text_list(text: str) -> dict:
         "parts": parts,
         "supplier_name": None,
         "document_date": None,
+        "supplier_total_dop": None,
+        "supplier_quotes": [],
         "extraction_confidence": "high" if (year and model and parts) else "medium",
     }
 
