@@ -11,8 +11,6 @@ from pathlib import Path
 
 import anthropic
 
-_SONNET_MODEL = os.environ.get("ANTHROPIC_SONNET_MODEL", "claude-sonnet-4-6")
-
 logger = logging.getLogger("parts-bot.ocr")
 
 _TRANSLATION_CACHE_PATH = Path(__file__).parent.parent / "cache" / "translation_cache.json"
@@ -65,15 +63,15 @@ Extract EXACTLY this JSON structure (no markdown, no backticks, just raw JSON):
   ],
   "supplier_name": "supplier name if visible, else null",
   "document_date": "date if visible, else null",
-  "supplier_total_dop": number_or_null,
   "supplier_quotes": [
     {
-      "supplier": "supplier name string",
+      "supplier_name": "exact name as written",
       "total_dop": number,
       "delivery_days_min": number_or_null,
       "delivery_days_max": number_or_null
     }
   ],
+  "supplier_total_dop": number_or_null,
   "extraction_confidence": "high|medium|low"
 }
 
@@ -86,9 +84,8 @@ RULES:
 - If price has comma as thousands separator (12,500), parse as 12500
 - If you cannot read something clearly, include it with extraction_confidence: "low"
 - NEVER skip a part — include everything, even if confidence is low
-- supplier_total_dop: set to the MINIMUM total across all supplier quotes (the cheapest one — that's our competitive benchmark). If only one quote exists, use that total. If no quotes exist, set to null.
-- supplier_quotes: extract ALL entries from the "COTIZACIONES RECIBIDAS" section if present. Each entry has: supplier name, total in DOP, and delivery days (shown as "7/7" or "5-8" format — parse into min/max integers). If the section is absent, set to an empty array [].
-- If there are multiple quotes, set supplier_total_dop to the MIN total across them."""
+- supplier_quotes: look for a "COTIZACIONES RECIBIDAS", "COTIZACIÓN RECIBIDA", or similar section listing multiple suppliers with totals. Extract EACH supplier as a separate entry with their total and delivery days if shown (e.g. "7/7 días" = min:7 max:7). If there is only one supplier total with no named section, put it as a single entry in supplier_quotes. If no supplier quotes at all, use an empty array [].
+- supplier_total_dop: set to the MINIMUM total_dop from supplier_quotes (the cheapest quote). If supplier_quotes is empty, set to null."""
 
 
 async def extract_from_image(image_path: str) -> dict:
@@ -123,43 +120,54 @@ async def extract_from_image(image_path: str) -> dict:
     client = anthropic.Anthropic(api_key=api_key)
 
     try:
-        response = client.messages.create(
-            model=_SONNET_MODEL,
-            max_tokens=8096,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": image_data,
+        def _call_and_parse() -> dict:
+            resp = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=8096,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": image_data,
+                            },
                         },
-                    },
-                    {
-                        "type": "text",
-                        "text": EXTRACTION_PROMPT,
-                    },
-                ],
-            }],
-        )
+                        {
+                            "type": "text",
+                            "text": EXTRACTION_PROMPT,
+                        },
+                    ],
+                }],
+            )
+            raw = resp.content[0].text.strip()
+            # Strip markdown fences (```json ... ``` or ``` ... ```)
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+                if raw.endswith("```"):
+                    raw = raw[:-3]
+                raw = raw.strip()
+            # Strip any trailing content after the closing brace
+            last_brace = raw.rfind("}")
+            if last_brace != -1:
+                raw = raw[: last_brace + 1]
+            return json.loads(raw), raw
 
-        # Parse JSON from response
-        text = response.content[0].text.strip()
-        # Handle potential markdown wrapping
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
+        text = ""
+        try:
+            result, text = _call_and_parse()
+            return result
+        except json.JSONDecodeError as e:
+            logger.warning(f"OCR JSON parse failed (attempt 1): {e} — retrying")
+        try:
+            result, text = _call_and_parse()
+            return result
+        except json.JSONDecodeError as e:
+            logger.error(f"OCR JSON parse failed (attempt 2): {e}")
+            return {"error": f"JSON parse error: {e}", "raw_response": text[:1000]}
 
-        result = json.loads(text)
-        return result
-
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse OCR response as JSON: {e}")
-        return {"error": f"JSON parse error: {e}", "raw_response": text[:500]}
     except anthropic.APIError as e:
         logger.error(f"Anthropic API error: {e}")
         return {"error": f"API error: {e}"}
@@ -168,133 +176,9 @@ async def extract_from_image(image_path: str) -> dict:
         return {"error": str(e)}
 
 
-# ── Bug 5: VIN validation ─────────────────────────────────────────────────────
-import re as _re_vin
-
-_VIN_RE = _re_vin.compile(r'^[A-HJ-NPR-Z0-9]{17}$')
-
-def validate_vin(vin: str) -> bool:
-    """VIN must be 17 chars, alphanumeric, no I/O/Q."""
-    if not vin:
-        return False
-    v = vin.strip().upper()
-    return bool(_VIN_RE.match(v))
-
-
-# ── Bug 5: PDF metadata extraction (pass 1) ───────────────────────────────────
-# Regex patterns for the supplier-quote / damage-estimate header.
-_VEHICLE_LINE_RE = _re_vin.compile(r'Veh[ií]culo[:\s]+(.+?)(?:\n|$)', _re_vin.IGNORECASE)
-_CHASIS_RE = _re_vin.compile(r'Chasis\s*No\.?[:\s]+([A-HJ-NPR-Z0-9]{11,17})', _re_vin.IGNORECASE)
-_VIN_RE_LINE = _re_vin.compile(r'VIN[:\s]+([A-HJ-NPR-Z0-9]{11,17})', _re_vin.IGNORECASE)
-_RECLAMACION_RE = _re_vin.compile(r'Reclamaci[oó]n\s*No\.?[:\s]+(\S+)', _re_vin.IGNORECASE)
-_VEHICLE_YMM_RE = _re_vin.compile(r'(\d{4})\s+(\w+)\s+(.+)')
-
-
-def _extract_pdf_metadata_regex(page_text: str) -> dict:
-    """Pass 1: regex-based metadata extraction from page 1 text.
-    Returns dict with possible keys: vin, vehicle (year/make/model), claim_number.
-    Missing keys indicate regex miss."""
-    out: dict = {}
-
-    # VIN — prefer Chasis No. over VIN: if both present
-    vin = None
-    m = _CHASIS_RE.search(page_text) or _VIN_RE_LINE.search(page_text)
-    if m:
-        vin_candidate = m.group(1).strip().upper()
-        if validate_vin(vin_candidate):
-            vin = vin_candidate
-    if vin:
-        out["vin"] = vin
-
-    # Claim number
-    m = _RECLAMACION_RE.search(page_text)
-    if m:
-        out["claim_number"] = m.group(1).strip()
-
-    # Vehicle line → year/make/model
-    m = _VEHICLE_LINE_RE.search(page_text)
-    if m:
-        raw = m.group(1).strip()
-        ymm = _VEHICLE_YMM_RE.match(raw)
-        if ymm:
-            out["vehicle"] = {
-                "year": int(ymm.group(1)),
-                "make": ymm.group(2).strip(),
-                "model": ymm.group(3).strip(),
-                "trim": None,
-            }
-        else:
-            out["vehicle_raw"] = raw
-
-    return out
-
-
-_METADATA_VISION_PROMPT = """You are looking at the first page of a Dominican Republic auto supplier quote or damage-estimate PDF.
-
-Extract ONLY the vehicle metadata (NOT the parts list). Return raw JSON, no markdown:
-{
-  "vin": "17-char VIN or null",
-  "vehicle": {
-    "year": number_or_null,
-    "make": "string_or_null",
-    "model": "string_or_null",
-    "trim": "string_or_null"
-  },
-  "claim_number": "string_or_null"
-}
-
-The VIN is 17 characters, alphanumeric, no letters I/O/Q. It may be labeled "Chasis No.", "VIN", or similar.
-The vehicle year/make/model is usually near "Vehículo:" or in the header.
-The claim number may be labeled "Reclamación No.", "Claim No.", or "No. Reclamación".
-If a field is missing, use null. Do NOT guess."""
-
-
-async def _extract_pdf_metadata_vision(image_path: str) -> dict:
-    """Pass 1 fallback: Haiku vision call on page-1 image for metadata only."""
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        return {}
-
-    try:
-        path = Path(image_path)
-        image_data = base64.standard_b64encode(path.read_bytes()).decode("utf-8")
-        client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=512,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {
-                        "type": "base64", "media_type": "image/png", "data": image_data,
-                    }},
-                    {"type": "text", "text": _METADATA_VISION_PROMPT},
-                ],
-            }],
-        )
-        text = response.content[0].text.strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
-        data = json.loads(text)
-        # Validate VIN if present
-        if data.get("vin") and not validate_vin(data["vin"]):
-            data["vin"] = None
-        return data
-    except Exception as e:
-        logger.warning(f"Haiku metadata vision fallback failed: {e}")
-        return {}
-
-
 async def extract_from_pdf(pdf_path: str) -> dict:
     """Extract parts data from a PDF file.
-
-    Bug 5 two-pass:
-      Pass 1 — metadata extraction from page 1 text (pdfplumber) with regex,
-               then Haiku vision fallback if regex missed VIN or vehicle.
-      Pass 2 — existing parts extraction (Sonnet vision per page, unchanged).
+    Converts each page to an image, then extracts from the first page with content.
     """
     try:
         import fitz  # PyMuPDF
@@ -305,84 +189,43 @@ async def extract_from_pdf(pdf_path: str) -> dict:
     if not path.exists():
         return {"error": f"PDF not found: {pdf_path}"}
 
-    # ── Pass 1: metadata extraction ──────────────────────────────────────────
-    metadata: dict = {}
-    try:
-        import pdfplumber
-        with pdfplumber.open(str(path)) as pdf_doc:
-            if pdf_doc.pages:
-                page1_text = pdf_doc.pages[0].extract_text() or ""
-        metadata = _extract_pdf_metadata_regex(page1_text)
-        logger.info(
-            f"PDF metadata pass 1 (regex): vin={metadata.get('vin')} "
-            f"vehicle={metadata.get('vehicle')} claim={metadata.get('claim_number')}"
-        )
-    except ImportError:
-        logger.warning("pdfplumber not installed — skipping regex metadata pass")
-    except Exception as e:
-        logger.warning(f"pdfplumber metadata pass failed: {e}")
-
-    # ── Pass 2: per-page parts extraction via Sonnet vision ──────────────────
     try:
         doc = fitz.open(str(path))
         if doc.page_count == 0:
             return {"error": "PDF has no pages"}
 
-        # Process all pages — multi-page PDFs must not drop any page
+        # Process ALL pages — multi-page PDFs must not drop any page
         results = []
-        page1_image_path = None
-        for page_num in range(doc.page_count):
+        all_supplier_quotes: list = []
+        page_count = doc.page_count
+        for page_num in range(page_count):
             page = doc[page_num]
             pix = page.get_pixmap(dpi=200)
 
             # Save as temp PNG
             temp_path = Path(pdf_path).parent / f"_temp_page_{page_num}.png"
             pix.save(str(temp_path))
-            if page_num == 0:
-                page1_image_path = str(temp_path)
 
             result = await extract_from_image(str(temp_path))
 
-            # Clean up temp file AFTER we may have used page1_image_path for fallback
-            if page_num != 0:
-                try:
-                    temp_path.unlink()
-                except OSError:
-                    pass
+            # Clean up temp file
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+            # Accumulate supplier quotes from every page (COTIZACIONES may be on last page)
+            if not result.get("error"):
+                sq = result.get("supplier_quotes") or []
+                if sq:
+                    all_supplier_quotes.extend(sq)
 
             if not result.get("error") and result.get("parts"):
                 results.append(result)
 
         doc.close()
 
-        # Haiku fallback for metadata if regex missed it — uses page 1 image
-        if page1_image_path:
-            need_vision = (not metadata.get("vin") or not metadata.get("vehicle"))
-            if need_vision:
-                logger.info("Regex metadata incomplete — trying Haiku vision fallback")
-                vision_meta = await _extract_pdf_metadata_vision(page1_image_path)
-                if vision_meta.get("vin") and not metadata.get("vin"):
-                    metadata["vin"] = vision_meta["vin"]
-                if vision_meta.get("vehicle") and not metadata.get("vehicle"):
-                    metadata["vehicle"] = vision_meta["vehicle"]
-                if vision_meta.get("claim_number") and not metadata.get("claim_number"):
-                    metadata["claim_number"] = vision_meta["claim_number"]
-            # Clean up page 1 temp file now
-            try:
-                Path(page1_image_path).unlink()
-            except OSError:
-                pass
-
         if not results:
-            # No parts extracted — still return metadata if we have it
-            if metadata.get("vin") or metadata.get("vehicle"):
-                return {
-                    "vin": metadata.get("vin"),
-                    "vehicle": metadata.get("vehicle"),
-                    "claim_number": metadata.get("claim_number"),
-                    "parts": [],
-                    "error": "Could not extract parts from any PDF page (metadata only)",
-                }
             return {"error": "Could not extract parts from any PDF page"}
 
         # Merge results from multiple pages (parts from page 2 extend page 1)
@@ -398,25 +241,16 @@ async def extract_from_pdf(pdf_path: str) -> dict:
                 merged["vin"] = extra["vin"]
                 merged["vehicle"] = extra.get("vehicle")
 
-        # Bug 5: metadata pass 1 wins — it's more reliable than vision-OCR for VIN/vehicle.
-        if metadata.get("vin") and validate_vin(metadata["vin"]):
-            merged["vin"] = metadata["vin"]
-        if metadata.get("vehicle"):
-            merged["vehicle"] = metadata["vehicle"]
-        if metadata.get("claim_number"):
-            merged["claim_number"] = metadata["claim_number"]
+        # Supplier quotes aggregated from all pages win over any single-page value
+        if all_supplier_quotes:
+            merged["supplier_quotes"] = all_supplier_quotes
+            # supplier_total_dop = MIN quote (best price for the customer)
+            totals = [q.get("total_dop") for q in all_supplier_quotes if q.get("total_dop")]
+            if totals:
+                merged["supplier_total_dop"] = min(totals)
 
-        # Final VIN validation
-        if merged.get("vin") and not validate_vin(merged["vin"]):
-            logger.warning(f"VIN '{merged['vin']}' failed validation (len/charset) — clearing")
-            merged["vin"] = None
-
-        merged["_pages_processed"] = doc.page_count
+        merged["_pages_processed"] = page_count
         merged["_pages_with_parts"] = len(results)
-        if doc.page_count > 1 and len(results) < doc.page_count:
-            logger.warning(
-                f"PDF had {doc.page_count} pages but only {len(results)} yielded parts"
-            )
 
         return merged
 
@@ -443,7 +277,7 @@ async def translate_unknown_part(part_name_dr: str, vehicle_context: str) -> str
 
     try:
         response = client.messages.create(
-            model=_SONNET_MODEL,
+            model="claude-sonnet-4-6",
             max_tokens=100,
             messages=[{
                 "role": "user",
