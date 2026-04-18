@@ -203,16 +203,26 @@ async def main():
         part["side"] = part["side"] or translated["side"]
         part["position"] = part["position"] or translated["position"]
 
+        # Dedup on DR Spanish original name — NOT the English translation.
+        # English translations can collide (GUARDALODO + GUARDAFANGO -> same English),
+        # falsely inflating quantities. Original Spanish is the faithful key.
         dedup_key = (
-            part["name_english"].lower().strip(),
+            part["name_original"].lower().strip(),
             (part["side"] or "").lower(),
             (part["position"] or "").lower(),
         )
         if dedup_key in seen_parts:
-            # Same part listed twice — increment quantity, accumulate price
-            seen_parts[dedup_key]["quantity"] += part["quantity"]
+            existing_qty = seen_parts[dedup_key]["quantity"]
+            new_qty = existing_qty + part["quantity"]
+            _pname = part["name_original"]
+            _pqty = part["quantity"]
+            logger.warning(
+                f"OCR duplicate detected: '{_pname}' appeared twice "
+                f"(qty {existing_qty} + {_pqty} = {new_qty}). "
+                "Merging — verify source PDF if totals look wrong."
+            )
+            seen_parts[dedup_key]["quantity"] = new_qty
             seen_parts[dedup_key]["local_price"] += part["local_price"]
-            logger.info(f"Deduped '{part['name_english']}' → qty {seen_parts[dedup_key]['quantity']}")
         else:
             seen_parts[dedup_key] = part
 
@@ -354,6 +364,27 @@ async def main():
                 r,
                 verified_by_correction=False,
             )
+
+    # Cross-row OEM uniqueness check (Bug 34/35 guardrail)
+    # If the same OEM appears on 2+ rows for different parts, flag both rows.
+    # This surfaces catalog ambiguity (e.g. 7zap has a combined radiator+fan assembly)
+    # rather than silently sending a quoter the same part number twice.
+    _oem_to_rows: dict[str, list[tuple[int, str]]] = {}
+    for _i, _r in enumerate(results):
+        _oem = (_r.get("best_option") or {}).get("part_number", "") or ""
+        if _oem and _oem not in ("N/F", ""):
+            _name = (_r.get("part") or {}).get("name_original", "")
+            _oem_to_rows.setdefault(_oem, []).append((_i, _name))
+    for _oem, _rows in _oem_to_rows.items():
+        if len(_rows) > 1:
+            _names = {n for _, n in _rows}
+            if len(_names) > 1:  # Same OEM, different parts — flag it
+                for _i, _ in _rows:
+                    _other = [str(ri + 1) for ri, _ in _rows if ri != _i]
+                    results[_i]["duplicate_oem_note"] = (
+                        f"⚠️ OEM duplicado con fila #{', '.join(_other)} — verificar cuál es correcto"
+                    )
+                    logger.warning(f"Duplicate OEM {_oem} on rows {[ri+1 for ri,_ in _rows]}: {list(_names)}")
 
     # Generate Excel
     logger.info(f"Generating Excel: {args.output}")
