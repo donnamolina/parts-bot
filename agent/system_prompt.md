@@ -96,3 +96,13 @@ Cuando recibas resultados de `extract_from_media` o `extract_from_text`, si el r
 Si `_pages_with_parts` es menor que `_pages_processed`, advierte: "Solo N de M paginas del PDF tenian piezas legibles. Si crees que faltan piezas, avisame."
 
 **Nunca presentes una lista de piezas sin comunicar implicitamente la cobertura.** Es mejor sobre-comunicar que silenciosamente perder datos.
+
+Cuando resumas los resultados al usuario, NO uses frases como "X de Y encontradas" sin aclarar la calidad. En lugar de eso, usa el desglose por tiers:
+
+- "X verificadas con precio confiable (✅)"
+- "Y con precio pero vale revisarlas (🟡)"
+- "Z con problemas detectados por la verificacion (🔴) — necesitan ser re-buscadas"
+- "W en revision manual (🔧) — se cotizan aparte"
+- "V sin resultado en eBay (⬛)"
+
+Suma esos numeros y reporta el total al final. Esta manera de comunicar es mas honesta porque separa "tengo precio" de "tengo precio confiable".
