@@ -253,6 +253,7 @@ def _build_scenario_sheet(wb, vehicle_info: dict, main_sr: int, main_sr_sup: int
 
 def generate_excel(results: list, vehicle_info: dict, output_path: str,
                    supplier_total_dop: float = None,
+                   supplier_quotes: list = None,
                    sonnet_flags: list = None) -> str:
     """Generate comparison Excel from search results.
 
@@ -387,9 +388,10 @@ def generate_excel(results: list, vehicle_info: dict, output_path: str,
         ws.cell(row=row, column=9, value=landed.get("weight_lbs", "?") if landed else "?")
         _style_data(ws.cell(row=row, column=9), bg=bg, align="center")
 
-        # Courier cost
+        # Courier cost — total for all units (unit_weight × qty × rate)
         if landed:
-            ws.cell(row=row, column=10, value=landed.get("courier_cost_dop", 0))
+            courier_total = round(landed.get("courier_cost_dop", 0) * qty, 0)
+            ws.cell(row=row, column=10, value=courier_total)
             _style_data(ws.cell(row=row, column=10), bg=bg, align="center")
             ws.cell(row=row, column=10).number_format = '#,##0'
         else:
@@ -513,8 +515,14 @@ def generate_excel(results: list, vehicle_info: dict, output_path: str,
 
     # Supplier total row (from OCR) — one row below the landed total
     sr_sup = sr + 1
+    _quotes = supplier_quotes or []
     if supplier_total_dop and supplier_total_dop > 0:
-        ws.cell(row=sr_sup, column=6, value="COTIZACIÓN SUPLIDOR:")
+        n_sup = len(_quotes)
+        label = (
+            f"COTIZACIÓN MÍNIMA ({n_sup} SUPLIDORES):" if n_sup > 1
+            else "COTIZACIÓN SUPLIDOR:"
+        )
+        ws.cell(row=sr_sup, column=6, value=label)
         _style_data(ws.cell(row=sr_sup, column=6), bold=True, bg=ORANGE_BG)
         sc2 = ws.cell(row=sr_sup, column=11, value=round(supplier_total_dop, 0))
         sc2.font = Font(bold=True, size=10, name="Calibri")
@@ -522,6 +530,23 @@ def generate_excel(results: list, vehicle_info: dict, output_path: str,
         sc2.border = BORDER
         sc2.alignment = Alignment(horizontal="center", vertical="center")
         sc2.number_format = '#,##0'
+        # Add individual quote lines when multiple suppliers
+        if n_sup > 1:
+            for _qi, _q in enumerate(_quotes):
+                _qrow = sr_sup + 1 + _qi
+                _days = ""
+                if _q.get("delivery_days_min"):
+                    _dmin = _q["delivery_days_min"]
+                    _dmax = _q.get("delivery_days_max") or _dmin
+                    _days = f" ({_dmin}–{_dmax} días)" if _dmax != _dmin else f" ({_dmin} días)"
+                _qlabel = f"  {_q.get('supplier', f'Suplidor {_qi+1}')}{_days}:"
+                ws.cell(row=_qrow, column=6, value=_qlabel)
+                _style_data(ws.cell(row=_qrow, column=6), bg=LIGHT_GRAY)
+                _qval = ws.cell(row=_qrow, column=11, value=round(_q.get("total_dop", 0), 0))
+                _qval.font = Font(size=9, name="Calibri")
+                _qval.number_format = '#,##0'
+                _qval.alignment = Alignment(horizontal="center")
+            sr_sup = sr_sup + n_sup  # shift stats row down past quote lines
 
     # Stats row
     sr2 = sr_sup + 1

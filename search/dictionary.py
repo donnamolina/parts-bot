@@ -81,6 +81,41 @@ DR_TO_ENGLISH = {
     "flear guardabarro": "fender flare",
     "flear": "fender flare",
 
+    # Decals / stickers (produce local in DR)
+    "calcomania de cama 4x4": "4x4 decal",
+    "calcomania compuerta trasera": "tailgate decal",
+    "calcomania de cama": "bed decal",
+    "calcomania 4x4": "4x4 decal",
+    "calcomanía de cama 4x4": "4x4 decal",
+    "calcomanía compuerta trasera": "tailgate decal",
+    "calcomanía de cama": "bed decal",
+    "calcomanía 4x4": "4x4 decal",
+    "calcomania": "decal",
+    "calcomanía": "decal",
+
+    # Hooks / hardware (dealer-only)
+    "gancho compuerta lateral": "side panel hook",
+    "gancho de compuerta lateral": "side panel hook",
+    "gancho lateral": "side panel hook",
+    "gancho": "hook",
+
+    # Hinges (dealer-only hardware)
+    "visagra de compuerta trasera": "tailgate hinge",
+    "visagra compuerta trasera": "tailgate hinge",
+    "visagras de compuerta trasera": "tailgate hinges",
+    "visagra superior": "upper hinge",
+    "bisagra de compuerta trasera": "tailgate hinge",
+    "bisagra compuerta trasera": "tailgate hinge",
+    "bisagras de compuerta trasera": "tailgate hinges",
+    "bisagra superior": "upper hinge",
+    "visagra": "hinge",
+    "bisagra": "hinge",
+
+    # Bumper end caps / flares
+    "aleta bumper delantero": "front bumper end cap",
+    "aleta de bumper": "bumper end cap",
+    "aleta bumper": "bumper end cap",
+
     # Grille variants (lower grille, not bumper cover)
     "parilla inferior bumper delantero": "front lower bumper grille",
     "parilla inferior bumper trasero": "rear lower bumper grille",
@@ -343,8 +378,9 @@ DR_TO_ENGLISH = {
     "frentil":                      "front clip",
     "base de pantallas":            "headlight mounting bracket",
     "base de pantalla":             "headlight mounting bracket",   # singular
-    "deslizador de pantalla":       "headlight adjuster",
-    "deslizador":                   "headlight adjuster",
+    "deslizador de pantalla delantera": "front headlight slider",
+    "deslizador de pantalla":       "headlight slider",
+    "deslizador":                   "headlight slider",
     "base de bumper":               "bumper reinforcement",
     "base de búmper":               "bumper reinforcement",
     "base de parachoque":           "bumper reinforcement",

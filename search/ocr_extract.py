@@ -66,6 +66,14 @@ Extract EXACTLY this JSON structure (no markdown, no backticks, just raw JSON):
   "supplier_name": "supplier name if visible, else null",
   "document_date": "date if visible, else null",
   "supplier_total_dop": number_or_null,
+  "supplier_quotes": [
+    {
+      "supplier": "supplier name string",
+      "total_dop": number,
+      "delivery_days_min": number_or_null,
+      "delivery_days_max": number_or_null
+    }
+  ],
   "extraction_confidence": "high|medium|low"
 }
 
@@ -78,7 +86,9 @@ RULES:
 - If price has comma as thousands separator (12,500), parse as 12500
 - If you cannot read something clearly, include it with extraction_confidence: "low"
 - NEVER skip a part — include everything, even if confidence is low
-- supplier_total_dop: the grand total at the bottom of the document (what the DR supplier is charging for ALL parts combined). Look for: "TOTAL", "MONTO TOTAL", "TOTAL A PAGAR", "COTIZACIONES RECIBIDAS", "COTIZACIÓN RECIBIDA", or any final dollar/peso amount at the bottom of the parts list. The "COTIZACIONES RECIBIDAS" section often contains a per-supplier total — extract that total number. If no document total exists, set to null."""
+- supplier_total_dop: set to the MINIMUM total across all supplier quotes (the cheapest one — that's our competitive benchmark). If only one quote exists, use that total. If no quotes exist, set to null.
+- supplier_quotes: extract ALL entries from the "COTIZACIONES RECIBIDAS" section if present. Each entry has: supplier name, total in DOP, and delivery days (shown as "7/7" or "5-8" format — parse into min/max integers). If the section is absent, set to an empty array [].
+- If there are multiple quotes, set supplier_total_dop to the MIN total across them."""
 
 
 async def extract_from_image(image_path: str) -> dict:
@@ -115,7 +125,7 @@ async def extract_from_image(image_path: str) -> dict:
     try:
         response = client.messages.create(
             model=_SONNET_MODEL,
-            max_tokens=4096,
+            max_tokens=8096,
             messages=[{
                 "role": "user",
                 "content": [
@@ -318,10 +328,10 @@ async def extract_from_pdf(pdf_path: str) -> dict:
         if doc.page_count == 0:
             return {"error": "PDF has no pages"}
 
-        # Convert first 2 pages to images (most quotes are 1-2 pages)
+        # Process all pages — multi-page PDFs must not drop any page
         results = []
         page1_image_path = None
-        for page_num in range(min(doc.page_count, 2)):
+        for page_num in range(doc.page_count):
             page = doc[page_num]
             pix = page.get_pixmap(dpi=200)
 
@@ -400,6 +410,13 @@ async def extract_from_pdf(pdf_path: str) -> dict:
         if merged.get("vin") and not validate_vin(merged["vin"]):
             logger.warning(f"VIN '{merged['vin']}' failed validation (len/charset) — clearing")
             merged["vin"] = None
+
+        merged["_pages_processed"] = doc.page_count
+        merged["_pages_with_parts"] = len(results)
+        if doc.page_count > 1 and len(results) < doc.page_count:
+            logger.warning(
+                f"PDF had {doc.page_count} pages but only {len(results)} yielded parts"
+            )
 
         return merged
 
