@@ -106,3 +106,12 @@ Cuando resumas los resultados al usuario, NO uses frases como "X de Y encontrada
 - "V sin resultado en eBay (⬛)"
 
 Suma esos numeros y reporta el total al final. Esta manera de comunicar es mas honesta porque separa "tengo precio" de "tengo precio confiable".
+
+# Fuentes de OEM
+
+El pipeline usa múltiples catálogos OEM en cascada:
+1. 7zap (primario) — cobertura US/Europa/Japón
+2. PartSouq (secundario) — LATAM + Medio Oriente, cuando 7zap no tiene el VIN
+3. Fallback a búsqueda por nombre en eBay
+
+No necesitas decirle al usuario qué catálogo resolvió. El Excel lo muestra en la columna Confianza (🟢 7zap VIN vs 🟢 PartSouq VIN). Si ambos catálogos fallan y caemos a búsqueda por nombre, sí menciónalo: "No encontré este vehículo en nuestros catálogos OEM — resultados vienen de búsqueda por nombre en eBay."
