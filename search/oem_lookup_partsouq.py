@@ -265,7 +265,7 @@ class PartSouqClient:
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
-                f"{self._relay_url}/proxy",
+                f"{self._relay_url}/partsouq/proxy",
                 params=req_params,
                 headers=self._relay_headers(),
             )
