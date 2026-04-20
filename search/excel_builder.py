@@ -11,6 +11,28 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+import re
+
+_EBAY_ITM_RE = re.compile(r"^https?://(?:www\.)?ebay\.com/itm/(\d+)")
+
+
+def _canonicalize_ebay_url(url):
+    if not url:
+        return url
+    m = _EBAY_ITM_RE.match(url)
+    if m:
+        return "https://www.ebay.com/itm/" + m.group(1)
+    return url
+
+
+def _hyperlink_cell(url, label="Ver →"):
+    url = _canonicalize_ebay_url(url)
+    if not url:
+        return None
+    if len(url) > 250:
+        return url
+    return '=HYPERLINK("' + url + '","' + label + '")'
+
 
 
 # Colors
@@ -472,11 +494,9 @@ def generate_excel(results: list, vehicle_info: dict, output_path: str,
         _style_data(ws.cell(row=row, column=14), bg=bg, align="center")
 
         # Link (col 15) — HYPERLINK formula for mobile compatibility
-        link_url = best.get("url", "")
-        if link_url:
-            safe_url = link_url.replace('"', '%22')
-            link_cell = ws.cell(row=row, column=15,
-                                value=f'=HYPERLINK("{safe_url}","Ver →")')
+        link_formula = _hyperlink_cell(best.get("url", ""))
+        if link_formula:
+            link_cell = ws.cell(row=row, column=15, value=link_formula)
             link_cell.font = LINK_FONT
             link_cell.border = BORDER
             link_cell.alignment = Alignment(horizontal="center", vertical="center")
