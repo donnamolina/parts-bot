@@ -170,6 +170,37 @@ async def search_single_part(
             except SevenZapAuthError as _e:
                 logger.error(f"7zap cookies expired: {_e}")
 
+        # ── PartSouq cascade — only when 7zap returns vin_not_in_catalog ─────
+        _zap_source = result.get("oem_source") or (
+            _zap.source if "_zap" in dir() and hasattr(_zap, "source") else ""
+        )
+        if (
+            not oem_number and
+            _zap_source == "vin_not_in_catalog" and
+            os.getenv("PARTSOUQ_ENABLED", "true").lower() == "true" and
+            os.getenv("PARTSOUQ_RELAY_URL")
+        ):
+            try:
+                from .oem_lookup_partsouq import lookup_oem_partsouq, PartSouqAuthError
+                _psq_query = f"{(side or '')} {part_english}".strip()
+                _psq = await lookup_oem_partsouq(
+                    vin, _psq_query, make_hint=vehicle_info.get("make")
+                )
+                if _psq.oem_number:
+                    oem_number = _psq.oem_number
+                    result["oem_source"] = _psq.source
+                    result["oem_confidence"] = _psq.confidence
+                    result["oem_description"] = _psq.part_name or ""
+                    logger.info(
+                        f"PartSouq OEM# for '{part_english}': {oem_number} ({_psq.source})"
+                    )
+                else:
+                    logger.debug(f"PartSouq no result for '{part_english}': {_psq.error}")
+            except PartSouqAuthError as _e:
+                logger.error(f"PartSouq cookies expired: {_e}")
+            except Exception as _e:
+                logger.warning(f"PartSouq lookup failed (non-fatal): {_e}")
+
         # Bug 10: For manual-review parts, stop here — skip eBay entirely.
         # Still return a minimal best_option with the OEM# (if 7zap found one) so the
         # Excel row shows the part_number for dealer quoting.
