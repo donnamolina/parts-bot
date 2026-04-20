@@ -81,6 +81,15 @@ DR_TO_ENGLISH = {
     "flear guardabarro": "fender flare",
     "flear": "fender flare",
 
+    # Engine undertray / splash shield
+    "cover inferior de motor completo": "engine splash shield",
+    "cover inferior de motor": "engine splash shield",
+    "cover inferior motor": "engine splash shield",
+    "protector inferior de motor": "engine splash shield",
+    "protector inferior motor": "engine splash shield",
+    "guarda inferior de motor": "engine splash shield",
+    "guarda inferior motor": "engine splash shield",
+
     # Decals / stickers (produce local in DR)
     "calcomania de cama 4x4": "4x4 decal",
     "calcomania compuerta trasera": "tailgate decal",

@@ -296,6 +296,10 @@ BODY_PART_TITLE_EXCLUDES = {
 
 BODY_PANEL_KEYWORDS = set(BODY_PANEL_MIN_PRICES.keys())
 
+NEGATIVE_KEYWORDS_BY_PART: dict[str, list[str]] = {
+    "engine splash shield": ["-bolts", "-hardware", "-fasteners", "-clips", "-kit", "-screws", "-nuts"],
+}
+
 
 def _body_category_id(query: str, part_english: str = "") -> str | None:
     """Return eBay category ID if the query is for a body panel / lighting part."""
@@ -350,8 +354,11 @@ async def search_ebay(
         "Authorization": f"Bearer {token}",
         "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
     }
+    # Append part-specific negative keywords to suppress wrong categories
+    _neg = NEGATIVE_KEYWORDS_BY_PART.get(part_english.lower().strip(), [])
+    ebay_query = query + (" " + " ".join(_neg) if _neg else "")
     params = {
-        "q": query,
+        "q": ebay_query,
         "limit": min(limit, 50),
         "filter": "buyingOptions:{FIXED_PRICE|AUCTION},deliveryCountry:US,conditions:{NEW|USED|REFURBISHED}",
     }
