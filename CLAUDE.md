@@ -32,3 +32,21 @@ Droplet B, PM2 id 0, `/opt/parts-bot/server.js`. SSH: `ssh droplet-b`.
 ## More context
 - Vault: `projects/parts-bot.md` in `donnamolina/molina-vault`
 - Infrastructure: `infra/droplet-b.md`, `infra/mac-mini-donna.md`
+
+## Auto-log substantive work to the vault
+
+When you complete any substantive work in this repo — a deploy, a bug fix, a meaningful refactor, a schema change, a new feature shipped — append a one-line entry to the corresponding vault page's History section and commit the vault.
+
+**Trigger:** substantive = anything you'd mention to a teammate at standup. Not: typo fixes, comment edits, dependency bumps, formatting-only changes.
+
+**Where:** `~/molina-vault/projects/parts-bot.md` — find the `## History` section and add a line at the top of its list.
+
+**Format:** `- YYYY-MM-DD: <one-line summary of what changed and why it matters>`
+
+**Commit:** `cd ~/molina-vault && git add projects/parts-bot.md && git commit -m "auto: parts-bot — <summary>"`
+
+**Don't push the vault** unless I explicitly ask. Local commits are fine; pushing is my call.
+
+**If the vault page doesn't exist** (new project, etc.), stop and ask me before creating one — vault structure is intentional.
+
+**If you're unsure whether something counts as substantive**, ask. Better to ask once than spam the vault with noise or skip something that mattered.
